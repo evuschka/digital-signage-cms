@@ -1,197 +1,109 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Digital Signage CMS - Управление контентом</title>
-    <!-- Подключаем Tailwind CSS для дизайна -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Подключаем Vue 3 -->
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-</head>
-<body class="bg-slate-900 text-slate-100 min-h-screen">
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.middleware.cors import CORSMiddleware
+import boto3
+import secrets
+from botocore.exceptions import ClientError
 
-    <div id="app" class="container mx-auto px-4 py-8 max-w-4xl">
-        <!-- Шапка -->
-        <header class="mb-8 border-b border-slate-700 pb-4 flex justify-between items-center">
-            <div>
-                <h1 class="text-3xl font-bold tracking-tight text-blue-400">Digital Signage CMS</h1>
-                <p class="text-slate-400 text-sm mt-1">Панель управления медиафайлами для экранов</p>
-            </div>
-            <div class="bg-slate-800 px-4 py-2 rounded-lg border border-slate-700 text-xs">
-                Статус бэкенда: <span class="text-green-400 font-semibold">● Онлайн</span>
-            </div>
-        </header>
+app = FastAPI(title="Digital Signage CMS API")
 
-        <!-- Блок загрузки файлов -->
-        <section class="bg-slate-800 border border-slate-700 rounded-xl p-6 mb-8 shadow-lg">
-            <h2 class="text-xl font-semibold mb-4 text-slate-200">Загрузка нового контента</h2>
-            <div class="flex flex-col sm:flex-row gap-4 items-center">
-                <input 
-                    type="file" 
-                    @change="handleFileSelect" 
-                    class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-500 cursor-pointer"
-                >
-                <button 
-                    @click="uploadFile" 
-                    :disabled="!selectedFile || uploading"
-                    class="w-full sm:w-auto bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium px-6 py-2 rounded-lg transition"
-                >
-                    {{ uploading ? 'Загрузка...' : 'Загрузить файл' }}
-                </button>
-            </div>
-            <p v-if="uploadMessage" class="mt-3 text-sm" :class="uploadSuccess ? 'text-green-400' : 'text-red-400'">
-                {{ uploadMessage }}
-            </p>
-        </section>
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        <!-- Блок списка файлов -->
-        <section class="bg-slate-800 border border-slate-700 rounded-xl p-6 shadow-lg">
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-xl font-semibold text-slate-200">Медиатека хранилища</h2>
-                <button @click="fetchFiles" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-md transition text-slate-300">
-                    Обновить список
-                </button>
-            </div>
+s3_client = boto3.client(
+    's3',
+    endpoint_url='http://localhost:9000',
+    aws_access_key_id='admin_cms',
+    aws_secret_access_key='password123',
+    region_name='us-east-1'
+)
 
-            <div v-if="files.length === 0" class="text-center py-8 text-slate-500">
-                В хранилище пока нет загруженных файлов.
-            </div>
+BUCKET_NAME = "digital-signage-media"
+MAX_STORAGE_BYTES = 100 * 1024 * 1024 * 1024  # 100 GB
 
-            <div v-else class="space-y-3">
-                <div v-for="file in files" :key="file.name" class="bg-slate-900 border border-slate-700/60 p-4 rounded-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                    <div>
-                        <p class="font-medium text-blue-300 break-all">{{ file.name }}</p>
-                        <p class="text-xs text-slate-500 mt-0.5">Размер: {{ formatSize(file.size) }}</p>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <a 
-                            :href="file.url" 
-                            target="_blank" 
-                            class="bg-slate-800 hover:bg-slate-700 text-blue-400 text-xs font-medium px-3.5 py-2 rounded-md border border-slate-700 transition"
-                        >
-                            Открыть ↗
-                        </a>
-                        <button 
-                            @click="deleteFile(file.name)" 
-                            class="bg-red-900/40 hover:bg-red-900 text-red-300 text-xs font-medium px-3.5 py-2 rounded-md border border-red-700/50 transition"
-                        >
-                            Удалить
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </section>
-    </div>
+security = HTTPBasic()
 
-    <script>
-        const { createApp, ref, onMounted } = Vue
+# Временная замена базы данных (City_ID для 7 городов)
+USERS = {
+    "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
+    "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"},
+    "user_spb": {"password": "user123", "role": "regional", "city_id": "spb"},
+    "user_kzn": {"password": "user123", "role": "regional", "city_id": "kazan"},
+    "user_ekb": {"password": "user123", "role": "regional", "city_id": "ekb"},
+    "user_nsk": {"password": "user123", "role": "regional", "city_id": "nsk"},
+    "user_nn": {"password": "user123", "role": "regional", "city_id": "nn"},
+    "user_che": {"password": "user123", "role": "regional", "city_id": "chelyabinsk"}
+}
 
-        createApp({
-            setup() {
-                const files = ref([])
-                const selectedFile = ref(null)
-                const uploading = ref(false)
-                const uploadMessage = ref('')
-                const uploadSuccess = ref(false)
+def get_current_user(credentials: HTTPBasicCredentials = Depends(security)):
+    user = USERS.get(credentials.username)
+    if not user or not secrets.compare_digest(user["password"], credentials.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный логин или пароль",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return {"username": credentials.username, **user}
 
-                // Получение списка файлов с бэкенда
-                const fetchFiles = async () => {
-                    try {
-                        const response = await fetch('http://localhost:8000/files/')
-                        const data = await response.json()
-                        files.value = data.files || []
-                    } catch (error) {
-                        console.error('Ошибка загрузки списка:', error)
-                    }
-                }
+def get_total_bucket_size():
+    try:
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
+        return sum(obj['Size'] for obj in response.get('Contents', []))
+    except ClientError:
+        return 0
 
-                // Выбор файла пользователем
-                const handleFileSelect = (event) => {
-                    selectedFile.value = event.target.files[0]
-                    uploadMessage.value = ''
-                }
+@app.post("/upload/")
+async def upload_file(
+    file: UploadFile = File(...),
+    target_city: str = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    if get_total_bucket_size() + file.size > MAX_STORAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Превышен глобальный лимит хранилища в 100 ГБ")
 
-                // Отправка файла на бэкенд
-                const uploadFile = async () => {
-                    if (!selectedFile.value) return
+    folder = current_user["city_id"]
+    if current_user["role"] == "admin":
+        folder = target_city if target_city else "global"
+    
+    file_key = f"{folder}/{file.filename}"
 
-                    uploading.value = true
-                    uploadMessage.value = ''
+    try:
+        s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key)
+        return {"message": f"Файл успешно загружен в филиал {folder}"}
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-                    const formData = new FormData()
-                    formData.append('file', selectedFile.value)
+@app.get("/files/")
+def list_files(current_user: dict = Depends(get_current_user)):
+    try:
+        prefix = "" if current_user["role"] == "admin" else f"{current_user['city_id']}/"
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
+        
+        files_list = []
+        for obj in response.get("Contents", []):
+            url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': BUCKET_NAME, 'Key': obj["Key"]},
+                ExpiresIn=3600
+            )
+            files_list.append({"name": obj["Key"], "size": obj["Size"], "url": url})
+        
+        return {"files": files_list}
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-                    try {
-                        const response = await fetch('http://localhost:8000/upload/', {
-                            method: 'POST',
-                            body: formData
-                        })
-
-                        if (response.ok) {
-                            uploadSuccess.value = true
-                            uploadMessage.value = 'Файл успешно загружен в систему!'
-                            selectedFile.value = null
-                            document.querySelector('input[type="file"]').value = ''
-                            fetchFiles()
-                        } else {
-                            throw new Error('Ошибка сервера при загрузке')
-                        }
-                    } catch (error) {
-                        uploadSuccess.value = false
-                        uploadMessage.value = 'Не удалось загрузить файл. Проверьте соединение с сервером.'
-                    } finally {
-                        uploading.value = false
-                    }
-                }
-
-                // Удаление файла
-                const deleteFile = async (fileName) => {
-                    if (!confirm(`Вы действительно хотите удалить файл "${fileName}"?`)) return
-
-                    try {
-                        const response = await fetch(`http://localhost:8000/files/${encodeURIComponent(fileName)}`, {
-                            method: 'DELETE'
-                        })
-
-                        if (response.ok) {
-                            fetchFiles()
-                        } else {
-                            throw new Error('Ошибка при удалении файла')
-                        }
-                    } catch (error) {
-                        console.error('Ошибка:', error)
-                        alert('Не удалось удалить файл')
-                    }
-                }
-
-                // Форматирование размера файла
-                const formatSize = (bytes) => {
-                    if (bytes === 0) return '0 Bytes'
-                    const k = 1024
-                    const sizes = ['Bytes', 'KB', 'MB', 'GB']
-                    const i = Math.floor(Math.log(bytes) / Math.log(k))
-                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-                }
-
-                onMounted(() => {
-                    fetchFiles()
-                })
-
-                return {
-                    files,
-                    selectedFile,
-                    uploading,
-                    uploadMessage,
-                    uploadSuccess,
-                    handleFileSelect,
-                    uploadFile,
-                    deleteFile,
-                    formatSize,
-                    fetchFiles
-                }
-            }
-        }).mount('#app')
-    </script>
-</body>
-</html>
+@app.delete("/files/{file_key:path}")
+def delete_file(file_key: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin" and not file_key.startswith(f"{current_user['city_id']}/"):
+        raise HTTPException(status_code=403, detail="Ошибка RBAC: Доступ запрещен")
+        
+    try:
+        s3_client.delete_object(Bucket=BUCKET_NAME, Key=file_key)
+        return {"message": "Файл удален"}
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=str(e))
