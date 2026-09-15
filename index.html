@@ -9,7 +9,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-white text-emerald-950 min-h-screen flex flex-col">
-    <div id="app" class="flex h-screen overflow-hidden">
+    <div id="app" class="flex h-screen overflow-hidden relative">
         
         <!-- ЭКРАН ВХОДА -->
         <div v-if="!isAuthenticated" class="w-full max-w-md mx-auto mt-16 bg-emerald-50 p-8 rounded-xl border border-emerald-200 shadow-xl self-start">
@@ -58,6 +58,7 @@
                 </div>
                 <nav class="flex-1 p-4 space-y-2 overflow-y-auto">
                     <a href="#" @click.prevent="switchTab('media')" :class="currentTab === 'media' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block px-4 py-2 rounded-lg transition">📁 Медиатека</a>
+                    <a href="#" @click.prevent="switchTab('playlists')" :class="currentTab === 'playlists' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block px-4 py-2 rounded-lg transition">📑 Плейлисты</a>
                     <a href="#" v-if="login === 'admin_main'" @click.prevent="switchTab('import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block px-4 py-2 rounded-lg transition">📥 Импорт файлов</a>
                     <a href="#" v-if="login === 'admin_main'" @click.prevent="switchTab('trash')" :class="currentTab === 'trash' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block px-4 py-2 rounded-lg transition">🗑️ Корзина</a>
                     <a href="#" @click.prevent="switchTab('schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block px-4 py-2 rounded-lg transition">📅 Расписания</a>
@@ -75,21 +76,20 @@
                         </div>
                         <p class="text-[10px] text-emerald-600">{{ formatSize(storageStats.used) }} из 100 ГБ</p>
                     </div>
-                    <button @click="logout" class="w-full bg-red-100 hover:bg-red-200 text-red-800 border border-red-300 px-4 py-2 rounded-lg text-sm transition font-medium">Выйти</button>
+                    <!-- Кнопка Выход с защитой от мисклика -->
+                    <button @click="requestConfirm($event, 'Вы действительно хотите выйти из системы?', logout)" class="w-full bg-red-100 hover:bg-red-200 text-red-800 border border-red-300 px-4 py-2 rounded-lg text-sm transition font-medium">Выйти</button>
                 </div>
             </aside>
 
             <main class="flex-1 p-8 overflow-y-auto bg-white h-full">
                 
-                <!-- ВКЛАДКА УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ (ТОЛЬКО ДЛЯ АДМИНА) -->
+                <!-- ВКЛАДКА УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ -->
                 <div v-if="currentTab === 'users' && login === 'admin_main'" class="space-y-6">
                     <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                         <div class="flex justify-between items-center mb-6">
                             <h2 class="text-xl font-semibold text-emerald-900">Управление учетными записями</h2>
                             <button @click="fetchAdminUsers" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium">Обновить</button>
                         </div>
-
-                        <!-- АКТИВНЫЕ ЗАПРОСЫ -->
                         <div v-if="adminRequests.length > 0" class="mb-8 bg-amber-50 border border-amber-300 rounded-lg p-4">
                             <h3 class="text-sm font-bold text-amber-900 mb-3">🔔 Запросы на сброс пароля от пользователей:</h3>
                             <div class="space-y-2">
@@ -98,12 +98,10 @@
                                         <p class="font-semibold text-emerald-900">Пользователь: <span class="text-emerald-700 font-bold">{{ req.username }}</span></p>
                                         <p class="text-slate-500 text-[10px]">Время запроса: {{ req.time }}</p>
                                     </div>
-                                    <button @click="forceReset(req.username)" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded transition font-medium">Сбросить до user123</button>
+                                    <button @click="requestConfirm($event, `Сбросить пароль для ${req.username}?`, () => forceReset(req.username))" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded transition font-medium">Сбросить до user123</button>
                                 </div>
                             </div>
                         </div>
-
-                        <!-- СПИСОК ПОЛЬЗОВАТЕЛЕЙ -->
                         <h3 class="text-sm font-semibold text-emerald-900 mb-3">Все пользователи системы</h3>
                         <div class="bg-white border border-emerald-200 rounded-lg overflow-hidden">
                             <table class="w-full text-sm text-left text-emerald-900">
@@ -121,7 +119,7 @@
                                         <td class="px-6 py-4">{{ info.role === 'admin' ? 'Администратор' : 'Региональный' }}</td>
                                         <td class="px-6 py-4">{{ info.city_id }}</td>
                                         <td class="px-6 py-4">
-                                            <button @click="forceReset(uname)" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded transition">Сбросить до user123</button>
+                                            <button @click="requestConfirm($event, `Сбросить пароль для ${uname}?`, () => forceReset(uname))" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded transition">Сбросить до user123</button>
                                         </td>
                                     </tr>
                                 </tbody>
@@ -130,30 +128,28 @@
                     </div>
                 </div>
 
+                <!-- ВКЛАДКА ПРОФИЛЬ -->
                 <div v-if="currentTab === 'profile'">
                     <section class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm max-w-xl mx-auto">
                         <h2 class="text-xl font-semibold text-emerald-900 mb-6">Настройки профиля</h2>
-                        
                         <div class="mb-8 p-4 bg-white rounded-lg border border-emerald-200">
                             <p class="text-sm text-emerald-600 mb-2">Текущий пользователь:</p>
                             <p class="font-semibold text-emerald-900 text-lg">{{ login }}</p>
                             <p class="text-sm text-emerald-700 mt-1">Роль: {{ login === 'admin_main' ? 'Администратор' : 'Региональный менеджер' }}</p>
                         </div>
-
                         <div class="p-5 bg-white rounded-lg border border-emerald-200">
                             <h3 class="font-medium text-emerald-900 mb-4">Смена пароля</h3>
                             <input v-model="profileForm.oldPassword" type="password" placeholder="Текущий пароль" class="w-full mb-3 px-4 py-2 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
                             <input v-model="profileForm.newPassword" type="password" placeholder="Новый пароль" class="w-full mb-3 px-4 py-2 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
                             <input v-model="profileForm.confirmPassword" type="password" placeholder="Повторите новый пароль" class="w-full mb-4 px-4 py-2 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
-                            
                             <button @click="updatePassword" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm transition font-medium">Сохранить новый пароль</button>
-                            
                             <p v-if="profileForm.error" class="mt-3 text-red-600 text-sm">{{ profileForm.error }}</p>
                             <p v-if="profileForm.success" class="mt-3 text-emerald-600 text-sm font-medium">{{ profileForm.success }}</p>
                         </div>
                     </section>
                 </div>
 
+                <!-- ВКЛАДКА МЕДИАТЕКА -->
                 <div v-if="currentTab === 'media'">
                     <section class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                         <div class="flex justify-between items-center mb-6">
@@ -199,13 +195,139 @@
                                 </div>
                                 <div class="flex gap-2 mt-auto">
                                     <a :href="file.url" target="_blank" class="flex-1 text-center bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded transition font-medium">Смотреть</a>
-                                    <button v-if="login === 'admin_main'" @click="deleteFile(file.name)" class="flex-1 bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition">В корзину</button>
+                                    <button v-if="login === 'admin_main'" @click="requestConfirm($event, 'Переместить файл в корзину?', () => deleteFile(file.name))" class="flex-1 bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition">В корзину</button>
                                 </div>
                             </div>
                         </div>
                     </section>
                 </div>
 
+                <!-- ВКЛАДКА ПЛЕЙЛИСТЫ -->
+                <div v-if="currentTab === 'playlists'" class="space-y-6">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-xl font-semibold text-emerald-900">Управление плейлистами (Фото/Видео ряды)</h2>
+                        <button v-if="login === 'admin_main'" @click="showPlaylistModal = true" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm">+ Создать плейлист</button>
+                    </div>
+
+                    <div v-if="showPlaylistModal" class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-md">
+                        <!-- Контент конструктора (оставлен без изменений) -->
+                        <h3 class="text-lg font-medium mb-4 text-emerald-800">Конструктор плейлиста</h3>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Название плейлиста</label>
+                                <input v-model="newPlaylist.name" type="text" placeholder="Например: Утренний показ" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
+                                <select v-model="newPlaylist.city" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                    <option value="global">Вся сеть</option>
+                                    <option value="moscow">Москва</option>
+                                    <option value="spb">Санкт-Петербург</option>
+                                    <option value="novocheboksarsk">Новочебоксарск</option>
+                                    <option value="yartsevo">Ярцево</option>
+                                    <option value="azov">Азов</option>
+                                    <option value="orenburg">Оренбург</option>
+                                    <option value="chernyakhovsk">Черняховск</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Пауза между файлами (сек)</label>
+                                <input v-model.number="newPlaylist.interval" type="number" min="0" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Количество повторов</label>
+                                <input v-model.number="newPlaylist.repeats" type="number" min="1" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                            </div>
+                        </div>
+
+                        <div class="bg-white p-4 rounded-lg border border-emerald-200 mb-4">
+                            <h4 class="text-xs font-semibold text-emerald-900 mb-2">Состав плейлиста:</h4>
+                            <div class="flex gap-2 mb-3">
+                                <select v-model="selectedFileToAdd" class="flex-1 bg-white border border-emerald-300 rounded p-2 text-sm">
+                                    <option v-for="f in files" :key="f.name" :value="f.name">{{ f.name }}</option>
+                                </select>
+                                <button @click="addFileToPlaylist" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm">Добавить файл</button>
+                            </div>
+
+                            <div v-if="newPlaylist.items.length === 0" class="text-xs text-emerald-600 py-4 text-center">Плейлист пока пуст. Добавьте файлы.</div>
+                            <div v-else class="space-y-2">
+                                <div v-for="(item, idx) in newPlaylist.items" :key="idx" class="flex items-center justify-between bg-emerald-50/50 p-2.5 rounded border border-emerald-200 text-xs">
+                                    <div class="flex items-center gap-2">
+                                        <div class="flex flex-col gap-0.5">
+                                            <button @click="movePlaylistItem(idx, -1)" :disabled="idx === 0" class="text-[10px] bg-white border px-1 rounded disabled:opacity-30 hover:bg-emerald-100">▲</button>
+                                            <button @click="movePlaylistItem(idx, 1)" :disabled="idx === newPlaylist.items.length - 1" class="text-[10px] bg-white border px-1 rounded disabled:opacity-30 hover:bg-emerald-100">▼</button>
+                                        </div>
+                                        <span class="font-bold text-emerald-800 ml-1">#{{ idx + 1 }}</span>
+                                        <span class="font-medium text-emerald-950">{{ item.file }}</span>
+                                        <span v-if="isVideo(item.file)" class="bg-purple-100 text-purple-800 text-[10px] px-1.5 py-0.5 rounded">Видео</span>
+                                        <span v-else class="bg-blue-100 text-blue-800 text-[10px] px-1.5 py-0.5 rounded">Фото</span>
+                                    </div>
+                                    <div class="flex items-center gap-3">
+                                        <div v-if="isImage(item.file)" class="flex items-center gap-1.5">
+                                            <span class="text-emerald-700">Время показа (сек):</span>
+                                            <input v-model.number="item.duration" type="number" min="1" class="w-16 bg-white border border-emerald-300 rounded p-1 text-center">
+                                        </div>
+                                        <div v-else class="text-slate-500 italic">Длительность: по видеоряду</div>
+                                        <button @click="removePlaylistItem(idx)" class="text-red-600 hover:text-red-800 font-bold px-2 py-1 bg-red-50 rounded border border-red-200">✕</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-end gap-3">
+                            <button @click="showPlaylistModal = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm">Отмена</button>
+                            <button @click="savePlaylist" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm">Сохранить плейлист</button>
+                        </div>
+                    </div>
+
+                    <!-- Модальное окно предпросмотра -->
+                    <div v-if="showPreviewModal" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+                        <div class="bg-white rounded-xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col border border-emerald-300">
+                            <div class="bg-emerald-800 text-white px-4 py-3 flex justify-between items-center">
+                                <h3 class="font-semibold text-sm">Предпросмотр плейлиста: {{ previewPlaylistName }}</h3>
+                                <button @click="closePreview" class="text-white hover:text-gray-200 font-bold text-lg">✕</button>
+                            </div>
+                            <div class="p-6 flex flex-col items-center justify-center bg-black min-h-[350px] relative">
+                                <div v-if="previewCurrentItem">
+                                    <img v-if="isImage(previewCurrentItem.file)" :src="getFileUrl(previewCurrentItem.file)" class="max-h-[300px] object-contain rounded">
+                                    <video v-else-if="isVideo(previewCurrentItem.file)" :src="getFileUrl(previewCurrentItem.file)" autoplay controls class="max-h-[300px] rounded"></video>
+                                </div>
+                                <div class="absolute bottom-3 left-4 text-white text-xs bg-black/60 px-3 py-1 rounded">
+                                    Слайд {{ previewIndex + 1 }} из {{ previewItems.length }} | Файл: {{ previewCurrentItem ? previewCurrentItem.file : '' }}
+                                </div>
+                            </div>
+                            <div class="bg-gray-100 px-4 py-3 flex justify-between items-center">
+                                <span class="text-xs text-gray-600">Эмуляция экрана вещания с учетом пауз и длительности</span>
+                                <button @click="closePreview" class="bg-gray-300 hover:bg-gray-400 text-gray-800 text-xs px-4 py-2 rounded font-medium">Закрыть предпросмотр</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
+                        <div v-if="playlists.length === 0" class="text-center py-8 text-emerald-600 bg-white rounded-lg border border-dashed border-emerald-200">Плейлисты еще не созданы.</div>
+                        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div v-for="pl in playlists" :key="pl.id" class="bg-white border border-emerald-200 p-4 rounded-lg shadow-sm flex flex-col justify-between">
+                                <div>
+                                    <div class="flex justify-between items-start mb-2">
+                                        <h3 class="font-bold text-emerald-900 text-base">{{ pl.name }}</h3>
+                                        <span class="bg-emerald-100 text-emerald-800 text-[10px] px-2 py-0.5 rounded uppercase font-semibold">{{ pl.city }}</span>
+                                    </div>
+                                    <p class="text-xs text-emerald-700 mb-1">Пауза: {{ pl.interval }} сек | Повторов: {{ pl.repeats }}</p>
+                                    <p class="text-xs font-semibold text-emerald-900 mt-2">Файлов в ряду: {{ pl.items.length }}</p>
+                                    <ul class="text-[11px] text-slate-600 list-disc list-inside mt-1 max-h-20 overflow-y-auto">
+                                        <li v-for="(it, i) in pl.items" :key="i">{{ it.file }} <span v-if="isImage(it.file)">({{ it.duration }}с)</span><span v-else>(видео)</span></li>
+                                    </ul>
+                                </div>
+                                <div class="mt-4 pt-3 border-t border-emerald-100 flex justify-between items-center">
+                                    <button @click="startPreview(pl)" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded font-medium transition">▶ Предпросмотр</button>
+                                    <button v-if="login === 'admin_main'" @click="requestConfirm($event, 'Удалить этот плейлист?', () => deletePlaylist(pl.id))" class="text-red-600 hover:text-red-800 text-xs font-medium">Удалить</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ВКЛАДКА ИМПОРТ -->
                 <div v-if="currentTab === 'import' && login === 'admin_main'" class="space-y-6">
                     <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                         <h2 class="text-xl font-semibold mb-2 text-emerald-900">Импорт контента</h2>
@@ -251,22 +373,30 @@
                     </div>
                 </div>
 
+                <!-- ВКЛАДКА КОРЗИНА -->
                 <div v-if="currentTab === 'trash' && login === 'admin_main'">
                     <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                         <div class="flex justify-between items-center mb-4">
-                            <h2 class="text-xl font-semibold text-emerald-900">Корзина</h2>
-                            <button v-if="trashFiles.length > 0" @click="emptyTrash" class="text-xs bg-red-100 text-red-800 px-3 py-1.5 rounded-md border border-red-200">Очистить всё</button>
+                            <h2 class="text-xl font-semibold text-emerald-900">Корзина (хранение до 30 дней)</h2>
+                            <button v-if="trashFiles.length > 0" @click="requestConfirm($event, 'Очистить корзину навсегда?', emptyTrash)" class="text-xs bg-red-100 text-red-800 px-3 py-1.5 rounded-md border border-red-200">Очистить всё</button>
                         </div>
                         <div v-if="trashFiles.length === 0" class="text-center py-12 text-emerald-600 border border-dashed border-emerald-200 rounded-lg bg-white">Корзина пуста.</div>
                         <div v-else class="space-y-3">
                             <div v-for="file in trashFiles" :key="file.name" class="bg-white border border-emerald-200 p-4 rounded-lg flex justify-between items-center shadow-sm">
-                                <p class="font-medium text-emerald-900 text-sm">{{ file.name }}</p>
+                                <div>
+                                    <p class="font-medium text-emerald-900 text-sm">{{ file.name }}</p>
+                                    <p class="text-[11px] text-emerald-600 mt-0.5">
+                                        Удалено: {{ formatDate(file.deleted_at) }} | 
+                                        <span class="font-semibold text-amber-700">{{ getRemainingDays(file.deleted_at) }}</span>
+                                    </p>
+                                </div>
                                 <button @click="restoreFile(file.name)" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 rounded-md shadow-sm">Восстановить</button>
                             </div>
                         </div>
                     </div>
                 </div>
 
+                <!-- ВКЛАДКА РАСПИСАНИЕ -->
                 <div v-if="currentTab === 'schedule'" class="space-y-6">
                     <div class="flex justify-between items-center">
                         <h2 class="text-xl font-semibold text-emerald-900">График трансляций (Smart Planner)</h2>
@@ -276,13 +406,27 @@
                     <div v-if="showAddModal" class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-md">
                         <h3 class="text-lg font-medium mb-4 text-emerald-800">Новый запуск (с проверкой конфликтов)</h3>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                            <div>
-                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Медиафайл</label>
-                                <select v-model="newSchedule.file" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
+                            
+                            <div class="sm:col-span-2 flex gap-4 bg-white p-3 rounded-lg border border-emerald-200">
+                                <label class="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                                    <input type="radio" value="file" v-model="scheduleType" @change="newSchedule.playlist_id = null"> Отдельный файл
+                                </label>
+                                <label class="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                                    <input type="radio" value="playlist" v-model="scheduleType" @change="newSchedule.file = ''"> Плейлист (Ряд)
+                                </label>
+                            </div>
+
+                            <div class="sm:col-span-2">
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">{{ scheduleType === 'file' ? 'Выберите файл' : 'Выберите плейлист' }}</label>
+                                <select v-if="scheduleType === 'file'" v-model="newSchedule.file" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
                                     <option v-for="f in files" :key="f.name" :value="f.name">{{ f.name }}</option>
                                 </select>
+                                <select v-else v-model="newSchedule.playlist_id" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
+                                    <option v-for="pl in playlists" :key="pl.id" :value="pl.id">📑 {{ pl.name }} (файлов: {{ pl.items.length }})</option>
+                                </select>
                             </div>
-                            <div>
+
+                            <div class="sm:col-span-2">
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
                                 <select v-model="newSchedule.city" @change="onCityChange" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
                                     <option value="global">Вся сеть</option>
@@ -294,7 +438,16 @@
                                     <option value="orenburg">Оренбург</option>
                                     <option value="chernyakhovsk">Черняховск</option>
                                 </select>
+                                
+                                <div class="mt-2 p-2 bg-emerald-100 border border-emerald-200 rounded flex items-center gap-2 text-xs text-emerald-800 shadow-inner">
+                                    <span>🌍</span>
+                                    <span>
+                                        Часовой пояс: <strong>{{ cityTimezones[newSchedule.city].label }}</strong>. 
+                                        Текущее время в филиале: <strong class="text-emerald-950 text-[13px]">{{ localCityTimeDisplay }}</strong>
+                                    </span>
+                                </div>
                             </div>
+                            
                             <div class="sm:col-span-2 bg-white p-4 rounded-lg border border-emerald-200">
                                 <div class="flex justify-between items-center mb-2">
                                     <label class="block text-xs font-semibold text-emerald-800">Целевые экраны:</label>
@@ -307,17 +460,17 @@
                                 </div>
                             </div>
                             <div>
-                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Начало</label>
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Начало (местное время филиала)</label>
                                 <input v-model="newSchedule.time_start" type="datetime-local" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
                             </div>
                             <div>
-                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Окончание</label>
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Окончание (местное время филиала)</label>
                                 <input v-model="newSchedule.time_end" type="datetime-local" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
                             </div>
                         </div>
                         <div class="flex justify-end gap-3">
                             <button @click="showAddModal = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm">Отмена</button>
-                            <button @click="addSchedule" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm">Сохранить</button>
+                            <button @click="addSchedule($event)" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm">Сохранить</button>
                         </div>
                     </div>
                     
@@ -325,19 +478,35 @@
                         <table v-if="schedules.length > 0" class="w-full text-sm text-left text-emerald-900">
                             <thead class="text-xs text-emerald-800 uppercase bg-emerald-100/70 border-b border-emerald-200">
                                 <tr>
-                                    <th class="px-6 py-3">Медиафайл</th>
-                                    <th class="px-6 py-3">Экраны</th>
-                                    <th class="px-6 py-3">Время</th>
+                                    <th class="px-6 py-3">Контент (Файл / Плейлист)</th>
+                                    <th class="px-6 py-3">Филиал / Экраны</th>
+                                    <th class="px-6 py-3">Время (Местное)</th>
                                     <th class="px-6 py-3">Статус</th>
                                     <th v-if="login === 'admin_main'" class="px-6 py-3">Действия</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr v-for="item in schedules" :key="item.id" class="border-b border-emerald-200 hover:bg-emerald-100/40">
-                                    <td class="px-6 py-4 font-medium">{{ item.file }}</td>
-                                    <td class="px-6 py-4">{{ !item.screens || item.screens.length === 0 ? 'Все экраны' : item.screens.join(', ') }}</td>
+                                    <td class="px-6 py-4 font-medium">
+                                        <span v-if="item.playlist_id" class="text-emerald-700 font-bold flex items-center gap-1">
+                                            📑 Плейлист: {{ getPlaylistName(item.playlist_id) }}
+                                        </span>
+                                        <span v-else>
+                                            📁 {{ item.file }}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4 text-xs">
+                                        <span class="font-bold text-emerald-800 uppercase">{{ item.city }}</span><br>
+                                        <span class="text-slate-500">{{ !item.screens || item.screens.length === 0 ? 'Все экраны' : item.screens.join(', ') }}</span>
+                                    </td>
                                     <td class="px-6 py-4 text-[11px] leading-tight">
-                                        С: {{ item.time_start.replace('T', ' ') }}<br>По: {{ item.time_end.replace('T', ' ') }}
+                                        <div class="flex flex-col gap-0.5">
+                                            <span>С: {{ item.time_start.replace('T', ' ') }}</span>
+                                            <span>По: {{ item.time_end.replace('T', ' ') }}</span>
+                                            <span class="mt-1 bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded w-max text-[9px] font-bold shadow-sm">
+                                                Часовой пояс: {{ cityTimezones[item.city] ? cityTimezones[item.city].label : 'МСК' }}
+                                            </span>
+                                        </div>
                                     </td>
                                     <td class="px-6 py-4">
                                         <span class="px-2.5 py-1 rounded text-xs font-medium" :class="{ 'text-emerald-800 bg-emerald-300': item.status === 'Активен', 'text-amber-800 bg-amber-200': item.status === 'Ожидание', 'text-slate-600 bg-slate-200': item.status === 'Завершен' }">
@@ -345,7 +514,7 @@
                                         </span>
                                     </td>
                                     <td v-if="login === 'admin_main'" class="px-6 py-4">
-                                        <button @click="deleteSchedule(item.id)" class="text-red-700 text-xs">Удалить</button>
+                                        <button @click="requestConfirm($event, 'Удалить из расписания?', () => deleteSchedule(item.id))" class="text-red-700 text-xs">Удалить</button>
                                     </td>
                                 </tr>
                             </tbody>
@@ -353,6 +522,7 @@
                     </div>
                 </div>
 
+                <!-- ВКЛАДКА МОНИТОРИНГ -->
                 <div v-if="currentTab === 'monitoring'">
                     <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                         <div class="flex justify-between items-center mb-6">
@@ -374,6 +544,7 @@
                     </div>
                 </div>
 
+                <!-- ВКЛАДКА ОТЧЕТЫ -->
                 <div v-if="currentTab === 'reports' && login === 'admin_main'">
                     <div class="space-y-6">
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -405,10 +576,36 @@
 
             </main>
         </template>
+        
+        <!-- ВСПЛЫВАЮЩИЕ ОКНА ПОДТВЕРЖДЕНИЯ (ЗАЩИТА ОТ МИСКЛИКА) -->
+        <div v-if="confirmDialog.show" class="fixed inset-0 z-[100]" @click="confirmDialog.show = false"></div>
+        <transition 
+            enter-active-class="transition duration-200 ease-out origin-bottom"
+            enter-from-class="opacity-0 scale-90"
+            enter-to-class="opacity-100 scale-100"
+            leave-active-class="transition duration-150 ease-in origin-bottom"
+            leave-from-class="opacity-100 scale-100"
+            leave-to-class="opacity-0 scale-90"
+        >
+            <div v-if="confirmDialog.show" :style="{ top: confirmDialog.y + 'px', left: confirmDialog.x + 'px' }" class="fixed z-[101] transform -translate-x-1/2 -translate-y-full mt-[-12px]">
+                <div class="bg-white border border-emerald-300 shadow-2xl rounded-xl p-4 w-64 relative">
+                    <!-- Уголок (стрелочка) указывающий на кнопку -->
+                    <div class="absolute -bottom-2 left-1/2 transform -translate-x-1/2 w-4 h-4 bg-white border-b border-r border-emerald-300 rotate-45"></div>
+                    
+                    <p class="text-sm font-medium text-emerald-900 text-center mb-4 relative z-10">{{ confirmDialog.text }}</p>
+                    <div class="flex justify-center gap-3 relative z-10">
+                        <button @click.stop="confirmDialog.onConfirm(); confirmDialog.show = false" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-5 py-2 rounded-md font-medium transition shadow-sm">Да</button>
+                        <button @click.stop="confirmDialog.show = false" class="bg-red-50 hover:bg-red-100 text-red-700 text-xs px-5 py-2 rounded-md font-medium border border-red-200 transition">Нет</button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
     </div>
 
+    <!-- СКРИПТ ЛОГИКИ VUE -->
     <script>
-        const { createApp, ref, computed } = Vue
+        const { createApp, ref, computed, onMounted, onUnmounted } = Vue
         
         createApp({
             setup() {
@@ -419,6 +616,19 @@
                 const resetForm = ref({ username: '', success: '' });
                 const showAdminAlertModal = ref(false);
 
+                // --- Защита от мисклика (всплывающее окно) ---
+                const confirmDialog = ref({ show: false, x: 0, y: 0, text: '', onConfirm: null });
+                const requestConfirm = (e, text, callback) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    confirmDialog.value = {
+                        show: true,
+                        x: rect.left + rect.width / 2, // Центр кнопки
+                        y: rect.top, // Верхняя граница кнопки
+                        text: text,
+                        onConfirm: callback
+                    };
+                };
+
                 const adminUsers = ref({});
                 const adminRequests = ref([]);
 
@@ -426,6 +636,18 @@
                 const selectedCity = ref('global'); const uploading = ref(false);
                 const uploadError = ref(''); const importLogs = ref([]); const uploadProgress = ref(0);
                 
+                const playlists = ref([]);
+                const showPlaylistModal = ref(false);
+                const selectedFileToAdd = ref('');
+                const newPlaylist = ref({ name: '', city: 'global', items: [], interval: 3, repeats: 1 });
+
+                const showPreviewModal = ref(false);
+                const previewPlaylistName = ref('');
+                const previewItems = ref([]);
+                const previewIndex = ref(0);
+                const previewCurrentItem = computed(() => previewItems.value[previewIndex.value] || null);
+                let previewTimer = null;
+
                 const searchQuery = ref(''); const filterCity = ref('all'); const sortBy = ref('date_desc');
                 const showAddModal = ref(false); const allScreensMap = ref({}); const availableScreens = ref([]);
                 const storageStats = ref({used: 0, max: 0, percent: 0}); const monitoringData = ref([]);
@@ -433,13 +655,96 @@
                 const analyticsData = ref({ total_shows: 0, total_hours: 0, status_counts: {}, city_counts: {} });
                 let chartStatusInstance = null; let chartCityInstance = null;
 
-                const newSchedule = ref({ file: '', city: 'global', screens: [], time_start: '', time_end: '' });
+                const scheduleType = ref('file');
+                const newSchedule = ref({ file: '', playlist_id: null, city: 'global', screens: [], time_start: '', time_end: '' });
                 const schedules = ref([]);
 
                 const profileForm = ref({ oldPassword: '', newPassword: '', confirmPassword: '', error: '', success: '' });
 
+                // ЧАСОВЫЕ ПОЯСА
+                const cityTimezones = {
+                    global: { label: 'МСК', offset: 3 },
+                    moscow: { label: 'МСК', offset: 3 },
+                    spb: { label: 'МСК', offset: 3 },
+                    novocheboksarsk: { label: 'МСК', offset: 3 },
+                    yartsevo: { label: 'МСК', offset: 3 },
+                    azov: { label: 'МСК', offset: 3 },
+                    orenburg: { label: 'МСК+2', offset: 5 },
+                    chernyakhovsk: { label: 'МСК-1', offset: 2 }
+                };
+
+                const localCityTimeDisplay = ref('');
+                let clockInterval = null;
+
+                const updateLocalClock = () => {
+                    const selectedOffset = cityTimezones[newSchedule.value.city]?.offset || 3;
+                    const nowUtc = new Date().getTime() + (new Date().getTimezoneOffset() * 60000);
+                    const cityDate = new Date(nowUtc + (3600000 * selectedOffset));
+                    localCityTimeDisplay.value = cityDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                };
+
+                onMounted(() => { clockInterval = setInterval(updateLocalClock, 1000); });
+                onUnmounted(() => { if (clockInterval) clearInterval(clockInterval); });
+
                 const isImage = (name) => /\.(jpeg|jpg|png|webp|gif|svg|heic)$/i.test(name);
                 const isVideo = (name) => /\.(mp4|mov|mkv|webm|avi)$/i.test(name);
+
+                const getPlaylistName = (id) => {
+                    const found = playlists.value.find(p => p.id === id);
+                    return found ? found.name : 'Неизвестный плейлист';
+                };
+
+                const getFileUrl = (fileName) => {
+                    const found = files.value.find(f => f.name === fileName);
+                    return found ? found.url : '';
+                }
+
+                const startPreview = (pl) => {
+                    if (!pl.items || pl.items.length === 0) return alert('Плейлист пуст');
+                    previewPlaylistName.value = pl.name;
+                    previewItems.value = pl.items;
+                    previewIndex.value = 0;
+                    showPreviewModal.value = true;
+                    runPreviewStep();
+                };
+
+                const runPreviewStep = () => {
+                    if (!showPreviewModal.value) return;
+                    const item = previewItems.value[previewIndex.value];
+                    if (!item) return;
+
+                    let delay = (item.duration || 10) * 1000;
+                    if (isVideo(item.file)) delay = 5000;
+
+                    if (previewTimer) clearTimeout(previewTimer);
+                    previewTimer = setTimeout(() => {
+                        previewIndex.value = (previewIndex.value + 1) % previewItems.value.length;
+                        runPreviewStep();
+                    }, delay);
+                };
+
+                const closePreview = () => {
+                    showPreviewModal.value = false;
+                    if (previewTimer) clearTimeout(previewTimer);
+                };
+
+                const movePlaylistItem = (index, direction) => {
+                    const newIndex = index + direction;
+                    if (newIndex < 0 || newIndex >= newPlaylist.value.items.length) return;
+                    const item = newPlaylist.value.items.splice(index, 1)[0];
+                    newPlaylist.value.items.splice(newIndex, 0, item);
+                };
+
+                const getRemainingDays = (deletedAt) => {
+                    if (!deletedAt) return 'Срок неизвестен';
+                    const delDate = new Date(deletedAt);
+                    const expiryDate = new Date(delDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+                    const now = new Date();
+                    const diffTime = expiryDate - now;
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    if (diffDays <= 0) return 'Истекает сегодня';
+                    return `Осталось хранения: ${diffDays} дн.`;
+                }
 
                 const filteredAndSortedFiles = computed(() => {
                     let result = files.value;
@@ -467,9 +772,7 @@
                         const response = await fetch('http://localhost:8000/files/', { headers: { 'Authorization': authHeader.value } })
                         if (response.ok) { 
                             isAuthenticated.value = true; 
-                            
                             if (login.value === 'admin_main') {
-                                // Проверяем запросы для админа
                                 const reqRes = await fetch('http://localhost:8000/admin/users/', { headers: { 'Authorization': authHeader.value } });
                                 const reqData = await reqRes.json();
                                 adminRequests.value = reqData.requests || [];
@@ -477,8 +780,7 @@
                                     showAdminAlertModal.value = true;
                                 }
                             }
-
-                            fetchData(); fetchScreens(); fetchTrash(); fetchStats(); fetchMonitoring();
+                            fetchData(); fetchScreens(); fetchTrash(); fetchStats(); fetchMonitoring(); fetchPlaylists();
                         } else { authError.value = 'Неверный логин/пароль' }
                     } catch (e) { authError.value = 'Сервер недоступен' }
                 }
@@ -512,7 +814,6 @@
                 }
 
                 const forceReset = async (uname) => {
-                    if (!confirm(`Сбросить пароль для пользователя ${uname} до 'user123'?`)) return;
                     try {
                         const res = await fetch('http://localhost:8000/admin/reset-password/', {
                             method: 'POST',
@@ -521,7 +822,6 @@
                         });
                         const data = await res.json();
                         if (res.ok) {
-                            alert(data.message);
                             fetchAdminUsers();
                         } else {
                             alert(data.detail || 'Ошибка');
@@ -529,7 +829,7 @@
                     } catch (e) { alert('Ошибка сети'); }
                 }
 
-                const logout = () => { isAuthenticated.value = false; login.value = ''; password.value = ''; files.value = []; trashFiles.value = []; schedules.value = []; currentTab.value = 'media'; showAdminAlertModal.value = false; }
+                const logout = () => { isAuthenticated.value = false; login.value = ''; password.value = ''; files.value = []; trashFiles.value = []; schedules.value = []; playlists.value = []; currentTab.value = 'media'; showAdminAlertModal.value = false; }
                 
                 const updatePassword = async () => {
                     profileForm.value.error = ''; profileForm.value.success = '';
@@ -568,6 +868,52 @@
                     const res = await fetch('http://localhost:8000/monitoring/', { headers: { 'Authorization': authHeader.value } })
                     const data = await res.json(); monitoringData.value = data.monitoring || [];
                 }
+                const fetchPlaylists = async () => {
+                    try {
+                        const res = await fetch('http://localhost:8000/playlists/', { headers: { 'Authorization': authHeader.value } });
+                        const data = await res.json();
+                        playlists.value = data.playlists || [];
+                    } catch (e) {}
+                }
+
+                const addFileToPlaylist = () => {
+                    if (!selectedFileToAdd.value) return;
+                    newPlaylist.value.items.push({ file: selectedFileToAdd.value, duration: 10 });
+                };
+
+                const removePlaylistItem = (index) => { newPlaylist.value.items.splice(index, 1); };
+
+                const savePlaylist = async () => {
+                    if (!newPlaylist.value.name.trim() || newPlaylist.value.items.length === 0) {
+                        return alert('Укажите название и добавьте хотя бы один файл в плейлист!');
+                    }
+                    try {
+                        const res = await fetch('http://localhost:8000/playlists/', {
+                            method: 'POST',
+                            headers: { 'Authorization': authHeader.value, 'Content-Type': 'application/json' },
+                            body: JSON.stringify(newPlaylist.value)
+                        });
+                        if (res.ok) {
+                            newPlaylist.value = { name: '', city: 'global', items: [], interval: 3, repeats: 1 };
+                            showPlaylistModal.value = false;
+                            fetchPlaylists();
+                        } else {
+                            const err = await res.json();
+                            alert(err.detail || 'Ошибка сохранения');
+                        }
+                    } catch (e) { alert('Ошибка сети'); }
+                };
+
+                const deletePlaylist = async (id) => {
+                    try {
+                        const res = await fetch(`http://localhost:8000/playlists/${id}`, {
+                            method: 'DELETE',
+                            headers: { 'Authorization': authHeader.value }
+                        });
+                        if (res.ok) fetchPlaylists();
+                    } catch (e) {}
+                };
+
                 const fetchAnalytics = async () => {
                     const res = await fetch('http://localhost:8000/analytics/', { headers: { 'Authorization': authHeader.value } })
                     analyticsData.value = await res.json();
@@ -606,6 +952,8 @@
                     currentTab.value = tab;
                     if (tab === 'reports') fetchAnalytics();
                     if (tab === 'users') fetchAdminUsers();
+                    if (tab === 'playlists') fetchPlaylists();
+                    if (tab === 'schedule') fetchPlaylists();
                 }
 
                 const fetchData = async () => {
@@ -623,6 +971,7 @@
                 const onCityChange = () => {
                     availableScreens.value = newSchedule.value.city === 'global' ? [] : (allScreensMap.value[newSchedule.value.city] || []);
                     newSchedule.value.screens = [];
+                    updateLocalClock();
                 }
                 const selectAllScreens = () => { newSchedule.value.screens = [...availableScreens.value]; }
                 const handleFileSelect = (e) => selectedFile.value = e.target.files[0]
@@ -656,7 +1005,6 @@
                 }
 
                 const deleteFile = async (fileName) => {
-                    if (!confirm(`Удалить в корзину?`)) return
                     await fetch(`http://localhost:8000/files/${encodeURIComponent(fileName)}`, { method: 'DELETE', headers: { 'Authorization': authHeader.value } })
                     fetchData(); fetchTrash();
                 }
@@ -665,24 +1013,28 @@
                     fetchData(); fetchTrash();
                 }
                 const emptyTrash = async () => {
-                    if (!confirm('Очистить корзину навсегда?')) return
                     await fetch('http://localhost:8000/trash/empty/', { method: 'DELETE', headers: { 'Authorization': authHeader.value } })
                     fetchTrash();
                 }
 
-                const addSchedule = async () => {
-                    if (!newSchedule.value.file || !newSchedule.value.time_start || !newSchedule.value.time_end) return alert('Заполните все поля');
-                    const response = await fetch('http://localhost:8000/schedules/', { 
-                        method: 'POST', headers: { 'Authorization': authHeader.value, 'Content-Type': 'application/json' }, 
-                        body: JSON.stringify(newSchedule.value) 
+                const addSchedule = (e) => {
+                    if (scheduleType.value === 'file' && !newSchedule.value.file) return alert('Выберите файл');
+                    if (scheduleType.value === 'playlist' && !newSchedule.value.playlist_id) return alert('Выберите плейлист');
+                    if (!newSchedule.value.time_start || !newSchedule.value.time_end) return alert('Заполните время начала и окончания');
+
+                    requestConfirm(e, 'Точно запланировать эту трансляцию?', async () => {
+                        const response = await fetch('http://localhost:8000/schedules/', { 
+                            method: 'POST', headers: { 'Authorization': authHeader.value, 'Content-Type': 'application/json' }, 
+                            body: JSON.stringify(newSchedule.value) 
+                        });
+                        const resData = await response.json();
+                        if (!response.ok) {
+                            alert(resData.detail);
+                        } else {
+                            newSchedule.value = { file: '', playlist_id: null, city: 'global', screens: [], time_start: '', time_end: '' };
+                            showAddModal.value = false; fetchData();
+                        }
                     });
-                    const resData = await response.json();
-                    if (!response.ok) {
-                        alert(resData.detail);
-                    } else {
-                        newSchedule.value = { file: '', city: 'global', screens: [], time_start: '', time_end: '' };
-                        showAddModal.value = false; fetchData();
-                    }
                 }
 
                 const deleteSchedule = async (id) => {
@@ -703,10 +1055,13 @@
                     login, password, isAuthenticated, authError, authenticate, logout, currentTab, switchTab,
                     isResetMode, resetForm, showAdminAlertModal, adminUsers, adminRequests, fetchAdminUsers, forceReset,
                     files, trashFiles, selectedFile, selectedCity, uploading, uploadError, importLogs, uploadProgress,
+                    playlists, showPlaylistModal, selectedFileToAdd, newPlaylist, addFileToPlaylist, removePlaylistItem, movePlaylistItem, savePlaylist, deletePlaylist,
+                    showPreviewModal, previewPlaylistName, previewItems, previewIndex, previewCurrentItem, startPreview, closePreview, getFileUrl, getPlaylistName,
                     searchQuery, filterCity, sortBy, filteredAndSortedFiles, storageStats, monitoringData, isImage, isVideo,
                     analyticsData, profileForm, updatePassword, requestReset, handleFileSelect, uploadFile, deleteFile, restoreFile, emptyTrash, 
-                    schedules, showAddModal, newSchedule, availableScreens, onCityChange, selectAllScreens, 
-                    addSchedule, deleteSchedule, formatSize, formatDate, fetchData, fetchTrash, fetchMonitoring
+                    schedules, showAddModal, scheduleType, newSchedule, availableScreens, onCityChange, selectAllScreens, 
+                    addSchedule, deleteSchedule, formatSize, formatDate, fetchData, fetchTrash, fetchMonitoring, getRemainingDays,
+                    cityTimezones, localCityTimeDisplay, confirmDialog, requestConfirm
                 }
             }
         }).mount('#app')
