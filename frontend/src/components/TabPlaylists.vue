@@ -196,23 +196,23 @@ onUnmounted(() => {
         </div>
     </div>
 
-    <!-- Модальное окно создания плейлиста -->
+    <!-- ШИРОКОЕ МОДАЛЬНОЕ ОКНО СОЗДАНИЯ ПЛЕЙЛИСТА -->
     <div v-if="isModalOpen" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-        <div class="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div class="bg-white rounded-2xl max-w-3xl w-full p-6 space-y-5 shadow-2xl border border-emerald-200 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b pb-3 border-emerald-100">
                 <h3 class="text-base font-bold text-emerald-900 m-0">Новый плейлист</h3>
-                <button type="button" @click="isModalOpen = false" class="text-gray-400 hover:text-gray-600 font-bold bg-transparent border-0 cursor-pointer">✕</button>
+                <button type="button" @click="isModalOpen = false" class="text-gray-400 hover:text-gray-600 font-bold bg-transparent border-0 cursor-pointer text-base">✕</button>
             </div>
 
-            <div>
-                <label class="block text-xs font-medium text-emerald-900 mb-1">Название плейлиста:</label>
-                <input v-model="newPlaylistForm.name" type="text" class="w-full px-3 py-2 bg-white text-emerald-950 border border-emerald-200 rounded-lg text-xs focus:outline-none focus:border-emerald-500" placeholder="Утренний эфир...">
-            </div>
-
-            <div class="grid grid-cols-3 gap-2">
+            <!-- Основные настройки в сетку -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="md:col-span-2">
+                    <label class="block text-xs font-semibold text-emerald-900 mb-1.5">Название плейлиста:</label>
+                    <input v-model="newPlaylistForm.name" type="text" class="w-full px-3.5 py-2.5 bg-white text-emerald-950 border border-emerald-300 rounded-xl text-xs focus:outline-none focus:border-emerald-500 shadow-sm" placeholder="Утренний эфир...">
+                </div>
                 <div>
-                    <label class="block text-[11px] font-medium text-emerald-900 mb-1">Город:</label>
-                    <select v-model="newPlaylistForm.city" class="w-full px-2 py-1.5 bg-white text-emerald-950 border border-emerald-200 rounded-lg text-xs focus:outline-none focus:border-emerald-500">
+                    <label class="block text-xs font-semibold text-emerald-900 mb-1.5">Город:</label>
+                    <select v-model="newPlaylistForm.city" class="w-full px-3 py-2.5 bg-white text-emerald-950 border border-emerald-300 rounded-xl text-xs focus:outline-none focus:border-emerald-500 shadow-sm">
                         <option value="global">global</option>
                         <option value="moscow">moscow</option>
                         <option value="spb">spb</option>
@@ -224,35 +224,43 @@ onUnmounted(() => {
                     </select>
                 </div>
                 <div>
-                    <label class="block text-[11px] font-medium text-emerald-900 mb-1">Пауза (сек):</label>
-                    <input v-model="newPlaylistForm.interval" type="number" class="w-full px-2 py-1.5 bg-white text-emerald-950 border border-emerald-200 rounded-lg text-xs focus:outline-none focus:border-emerald-500">
-                </div>
-                <div>
-                    <label class="block text-[11px] font-medium text-emerald-900 mb-1">Повторы:</label>
-                    <input v-model="newPlaylistForm.repeats" type="number" class="w-full px-2 py-1.5 bg-white text-emerald-950 border border-emerald-200 rounded-lg text-xs focus:outline-none focus:border-emerald-500">
+                    <label class="block text-xs font-semibold text-emerald-900 mb-1.5">Пауза / Повторы:</label>
+                    <div class="flex gap-2">
+                        <input v-model="newPlaylistForm.interval" type="number" class="w-1/2 px-2.5 py-2.5 bg-white text-emerald-950 border border-emerald-300 rounded-xl text-xs text-center shadow-sm" title="Пауза (сек)">
+                        <input v-model="newPlaylistForm.repeats" type="number" class="w-1/2 px-2.5 py-2.5 bg-white text-emerald-950 border border-emerald-300 rounded-xl text-xs text-center shadow-sm" title="Повторы">
+                    </div>
                 </div>
             </div>
 
+            <!-- Добавление файла -->
             <div>
-                <label class="block text-xs font-medium text-emerald-900 mb-1">Добавить файлы из медиатеки:</label>
-                <select @change="(e) => { addItem(e.target.value); e.target.value = ''; }" class="w-full px-3 py-2 bg-white text-emerald-950 border border-emerald-200 rounded-lg text-xs focus:outline-none focus:border-emerald-500">
+                <label class="block text-xs font-semibold text-emerald-900 mb-1.5">Добавить файлы из медиатеки:</label>
+                <select @change="(e) => { addItem(e.target.value); e.target.value = ''; }" class="w-full px-3.5 py-2.5 bg-white text-emerald-950 border border-emerald-300 rounded-xl text-xs focus:outline-none focus:border-emerald-500 shadow-sm">
                     <option value="">-- Выберите файл для добавления --</option>
                     <option v-for="f in availableFiles" :key="f.name" :value="f.name">{{ f.name }}</option>
                 </select>
             </div>
 
-            <div class="space-y-1 max-h-36 overflow-y-auto">
-                <div v-for="(item, idx) in newPlaylistForm.items" :key="idx" class="flex items-center gap-2 bg-emerald-50 p-2 rounded text-xs">
-                    <span class="truncate flex-1 font-medium text-emerald-900">{{ item.file }}</span>
-                    <input v-model.number="item.duration" type="number" class="w-14 px-1 py-0.5 bg-white text-emerald-950 border border-emerald-200 rounded text-center text-xs" title="Длительность показа в сек">
-                    <span class="text-emerald-700">сек.</span>
-                    <button type="button" @click="removeItem(idx)" class="text-red-500 hover:text-red-700 font-bold px-1 bg-transparent border-0 cursor-pointer">✕</button>
+            <!-- Список добавленных файлов -->
+            <div class="space-y-2 max-h-52 overflow-y-auto pr-1">
+                <div v-if="newPlaylistForm.items.length === 0" class="text-center py-4 text-gray-400 text-xs border border-dashed border-emerald-200 rounded-xl">
+                    Файлы еще не добавлены в плейлист
+                </div>
+                <div v-for="(item, idx) in newPlaylistForm.items" :key="idx" class="flex items-center gap-3 bg-emerald-50/60 p-2.5 rounded-xl border border-emerald-200/80 text-xs">
+                    <span class="font-bold text-emerald-900 w-6 text-center">{{ idx + 1 }}.</span>
+                    <span class="truncate flex-1 font-medium text-emerald-950" :title="item.file">{{ item.file }}</span>
+                    <div class="flex items-center gap-1 shrink-0">
+                        <input v-model.number="item.duration" type="number" class="w-16 px-2 py-1.5 bg-white text-emerald-950 border border-emerald-300 rounded-lg text-center text-xs shadow-sm">
+                        <span class="text-emerald-800 text-[11px]">сек.</span>
+                    </div>
+                    <button type="button" @click="removeItem(idx)" class="text-red-500 hover:text-red-700 font-bold px-2 py-1 bg-white border border-red-200 rounded-lg cursor-pointer transition">✕</button>
                 </div>
             </div>
 
-            <div class="flex justify-end gap-2 pt-3 border-t border-emerald-100">
-                <button type="button" @click="isModalOpen = false" class="px-4 py-2 border border-emerald-200 rounded-lg text-xs font-medium bg-transparent text-emerald-900 cursor-pointer hover:bg-emerald-50">Отмена</button>
-                <button type="button" @click="handleSavePlaylist" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium border-0 cursor-pointer shadow-sm">Сохранить</button>
+            <!-- Кнопки действий -->
+            <div class="flex justify-end gap-3 pt-4 border-t border-emerald-100">
+                <button type="button" @click="isModalOpen = false" class="px-5 py-2.5 border border-emerald-200 rounded-xl text-xs font-semibold bg-white text-emerald-900 cursor-pointer hover:bg-emerald-50 transition">Отмена</button>
+                <button type="button" @click="handleSavePlaylist" class="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold border-0 cursor-pointer shadow-sm transition">Сохранить</button>
             </div>
         </div>
     </div>

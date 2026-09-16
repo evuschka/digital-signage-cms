@@ -1,14 +1,24 @@
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref } from 'vue';
 
 export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
     const schedules = ref([]); 
     const showAddModal = ref(false); 
     const scheduleType = ref('file');
     const newSchedule = ref({ file: '', playlist_id: null, city: 'global', screens: [], time_start: '', time_end: '' });
-    const allScreensMap = ref({}); 
+    
+    // ЖЕЛЕЗОБЕТОННЫЙ ЗАПАС: вшиваем экраны сразу сюда, чтобы они всегда были доступны
+    const allScreensMap = ref({
+        moscow: ['Москва-Экран-1', 'Москва-Экран-2', 'Москва-Экран-3'],
+        spb: ['СПБ-Экран-1', 'СПБ-Экран-2'],
+        novocheboksarsk: ['Новочебоксарск-Экран-1'],
+        yartsevo: ['Ярцево-Экран-1'],
+        azov: ['Азов-Экран-1'],
+        orenburg: ['Оренбург-Экран-1'],
+        chernyakhovsk: ['Черняховск-Экран-1']
+    }); 
+    
     const availableScreens = ref([]);
     
-    // Оставляем часовые пояса для истории, но они больше не сбивают логику
     const cityTimezones = {
         global: { label: 'МСК', offset: 3 }, moscow: { label: 'МСК', offset: 3 }, spb: { label: 'МСК', offset: 3 }, novocheboksarsk: { label: 'МСК', offset: 3 },
         yartsevo: { label: 'МСК', offset: 3 }, azov: { label: 'МСК', offset: 3 }, orenburg: { label: 'МСК+2', offset: 5 }, chernyakhovsk: { label: 'МСК-1', offset: 2 }
@@ -18,7 +28,9 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
         try {
             const res = await fetch('/screens/', { headers: { 'Authorization': authHeader.value } });
             const data = await safeJson(res); 
-            allScreensMap.value = data.screens || {};
+            if (data.screens && Object.keys(data.screens).length > 0) {
+                allScreensMap.value = data.screens;
+            }
         } catch (e) {}
     };
 
@@ -30,17 +42,31 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
         } catch (e) {}
     };
 
+    // Обновляем доступные экраны при смене города
     const onCityChange = () => {
-        availableScreens.value = newSchedule.value.city === 'global' ? [] : (allScreensMap.value[newSchedule.value.city] || []);
-        newSchedule.value.screens = []; 
+        if (!newSchedule.value.city || newSchedule.value.city === 'global') {
+            availableScreens.value = [];
+            newSchedule.value.screens = [];
+        } else {
+            // Достаем из нашего гарантированного справочника
+            availableScreens.value = allScreensMap.value[newSchedule.value.city] || [];
+            newSchedule.value.screens = [...availableScreens.value]; // Сразу выделяем все чекбоксы
+        }
     };
 
     const selectAllScreens = () => { 
-        newSchedule.value.screens = [...availableScreens.value]; 
+        if (newSchedule.value.screens.length === availableScreens.value.length) {
+            newSchedule.value.screens = []; // Снять все
+        } else {
+            newSchedule.value.screens = [...availableScreens.value]; // Выбрать все
+        }
     };
 
     const openScheduleModal = () => {
         showAddModal.value = true;
+        newSchedule.value.city = 'global'; // При открытии всегда сбрасываем на "Вся сеть"
+        onCityChange();
+
         setTimeout(() => {
             if (window.flatpickr) {
                 window.flatpickr("#time_start_picker", { 
@@ -66,23 +92,21 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
 
         const st = new Date(newSchedule.value.time_start);
         const en = new Date(newSchedule.value.time_end);
-        
-        // Текущее время на ПК администратора (Московское время)
         const now = new Date(); 
 
-        // СТРОГОЕ ПРАВИЛО: нельзя ставить время меньше текущего по МСК
-        if (st < now) return showToast('Ошибка: нельзя запланировать трансляцию в прошлом (относительно МСК)!', 'error');
+        if (st < now) return showToast('Ошибка: нельзя запланировать трансляцию в прошлом!', 'error');
         if (en <= st) return showToast('Ошибка: время окончания должно быть позже времени начала', 'error');
 
         requestConfirm(e, 'Запланировать эту трансляцию?', async () => {
+            const payload = { ...newSchedule.value, type: scheduleType.value };
             const res = await fetch('/schedules/', { 
                 method: 'POST', 
                 headers: { 'Authorization': authHeader.value, 'Content-Type': 'application/json' }, 
-                body: JSON.stringify(newSchedule.value) 
+                body: JSON.stringify(payload) 
             });
             if (!res.ok) {
                 const resData = await safeJson(res); 
-                showToast(resData.detail, 'error');
+                showToast(resData.detail || 'Ошибка сохранения', 'error');
             } else {
                 newSchedule.value = { file: '', playlist_id: null, city: 'global', screens: [], time_start: '', time_end: '' };
                 showAddModal.value = false; 
