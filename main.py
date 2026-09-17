@@ -228,6 +228,16 @@ def get_current_user(request: Request):
         
     return {"username": user["username"], "role": user["role"], "city_id": user["city_id"]}
 
+@app.post("/log-login/")
+def log_login_event(current_user: dict = Depends(get_current_user)):
+    log_action(current_user["username"], "Вход", "Успешная авторизация в системе")
+    return {"status": "success"}
+
+@app.post("/log-logout/")
+def log_logout_event(current_user: dict = Depends(get_current_user)):
+    log_action(current_user["username"], "Выход", "Сеанс завершен пользователем")
+    return {"status": "success"}
+
 @app.post("/request-reset/")
 @limiter.limit("3/minute")
 def request_reset(request: Request, data: ResetRequest):
@@ -334,13 +344,15 @@ def get_storage_stats(current_user: dict = Depends(get_current_user)):
     percent = (size / MAX_STORAGE_BYTES) * 100
     return {"used": size, "max": MAX_STORAGE_BYTES, "percent": round(percent, 2)}
 
+# БЛОКИРОВКА МОНИТОРИНГА ТОЛЬКО ДЛЯ АДМИНОВ
 @app.get("/monitoring/")
 def get_monitoring(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Доступ к мониторингу разрешен только администраторам")
+        
     current_minute = int(time.time() / 60)
     status_list = []
     for city, screens in SCREENS_DB.items():
-        if current_user["role"] != "admin" and current_user["city_id"] != city:
-            continue
         for sc in screens:
             random.seed(f"{sc}_{current_minute}")
             status_list.append({

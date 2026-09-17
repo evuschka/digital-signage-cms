@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useAuth } from './composables/useAuth.js';
 import { useHelpers } from './composables/useHelpers.js';
 import { useMedia } from './composables/useMedia.js';
@@ -43,7 +43,6 @@ const playlists = usePlaylists(auth.authHeader, showToast, isImage, isVideo, saf
 const schedules = useSchedules(auth.authHeader, showToast, requestConfirm, safeJson);
 const reports = useReports(auth.authHeader, showToast, safeJson);
 
-// Достаем рефы графиков наружу для правильного привязывания в шаблоне
 const { chartStatusRef, chartCityRef } = reports;
 
 const currentTab = ref('media');
@@ -53,14 +52,17 @@ const loadAllData = async () => {
     if (auth.login.value === 'admin_main') {
         await users.fetchAdminUsers();
         if (users.adminRequests.value.length > 0) auth.showAdminAlertModal.value = true;
+        
+        // Только админу загружаем плейлисты и мониторинг сразу
+        playlists.fetchPlaylists();
+        reports.fetchMonitoring();
     }
+    
     media.fetchFiles(); 
     media.fetchStats(); 
     media.fetchTrash();
     schedules.fetchScreens(); 
     schedules.fetchSchedules();
-    reports.fetchMonitoring(); 
-    if (auth.login.value === 'admin_main') playlists.fetchPlaylists();
 };
 
 // Загрузка при старте (если уже авторизован)
@@ -70,16 +72,32 @@ onMounted(async () => {
     }
 });
 
-// Обработка входа
+// ОБРАБОТКА ВХОДА (С записью в лог)
 const authenticate = async () => {
     const success = await auth.doLogin();
     if (success) {
+        try {
+            await fetch('/log-login/', { 
+                method: 'POST', 
+                headers: { 'Authorization': auth.authHeader.value } 
+            });
+        } catch (e) { console.error("Ошибка записи лога входа", e); }
+        
         await loadAllData();
     }
 };
 
-// Обработка выхода
-const logoutHandler = () => {
+// ОБРАБОТКА ВЫХОДА (С записью в лог)
+const logoutHandler = async () => {
+    if (auth.isAuthenticated.value) {
+        try {
+            await fetch('/log-logout/', { 
+                method: 'POST', 
+                headers: { 'Authorization': auth.authHeader.value } 
+            });
+        } catch (e) { console.error("Ошибка записи лога выхода", e); }
+    }
+    
     auth.doLogout();
     media.files.value = []; 
     media.trashFiles.value = [];
@@ -135,7 +153,7 @@ const updatePassword = async () => {
 };
 
 // ==========================================
-// ЛОГИКА ЦЕЛЕВЫХ ЭКРАНОВ (РАСПИСАНИЕ И ПЛЕЕР)
+// ЛОГИКА ЦЕЛЕВЫХ ЭКРАНОВ И ВРЕМЕНИ
 // ==========================================
 const fallbackScreens = {
     moscow: ['Москва-Экран-1', 'Москва-Экран-2', 'Москва-Экран-3'],
@@ -171,11 +189,46 @@ const toggleSelectAllScreens = () => {
 
 const handleCityChange = () => {
     schedules.newSchedule.value.screens = []; 
+    updateLocalClock();
     if (schedules.onCityChange) schedules.onCityChange();
 };
 
+const cityTimezones = {
+    global: { label: 'МСК', offset: 3 },
+    moscow: { label: 'МСК', offset: 3 },
+    spb: { label: 'МСК', offset: 3 },
+    novocheboksarsk: { label: 'МСК', offset: 3 },
+    yartsevo: { label: 'МСК', offset: 3 },
+    azov: { label: 'МСК', offset: 3 },
+    orenburg: { label: 'МСК+2', offset: 5 },
+    chernyakhovsk: { label: 'МСК-1', offset: 2 }
+};
+
+const localCityTimeDisplay = ref('');
+let clockInterval = null;
+
+const updateLocalClock = () => {
+    if (!schedules.showAddModal.value) return; 
+    const selectedCity = schedules.newSchedule.value.city || 'global';
+    const selectedOffset = cityTimezones[selectedCity]?.offset || 3;
+    
+    const now = new Date();
+    const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const cityDate = new Date(utcTime + (3600000 * selectedOffset));
+    
+    localCityTimeDisplay.value = cityDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+};
+
+onMounted(() => {
+    clockInterval = setInterval(updateLocalClock, 1000);
+});
+
+onUnmounted(() => {
+    if (clockInterval) clearInterval(clockInterval);
+});
+
 // ==========================================
-// ЛОГИКА ПЛЕЕРА ТРАНСЛЯЦИЙ (ЭТАП 9)
+// ЛОГИКА ПЛЕЕРА ТРАНСЛЯЦИЙ
 // ==========================================
 const monitorSelectedCity = ref('moscow');
 const monitorSelectedScreen = ref('Москва-Экран-1');
@@ -186,17 +239,14 @@ const handleMonitorCityChange = () => {
     monitorSelectedScreen.value = screens.length > 0 ? screens[0] : '';
 };
 
-// Ищем активное расписание для выбранного города и экрана
 const activeMonitorSchedule = computed(() => {
     if (!monitorSelectedCity.value || !monitorSelectedScreen.value) return null;
     
-    // Перебираем расписания в поисках "Активен" для нужного таргета
     const list = schedules.schedules?.value || [];
     return list.find(s => {
         if (s.status !== 'Активен') return false;
         if (s.city !== 'global' && s.city !== monitorSelectedCity.value) return false;
         
-        // Если указаны конкретные экраны, проверяем их
         if (s.screens && s.screens.length > 0) {
             if (!s.screens.includes(monitorSelectedScreen.value)) return false;
         }
@@ -239,20 +289,19 @@ const getFileUrl = (fileName) => {
             <h2 class="text-2xl font-bold mb-6 text-emerald-800 text-center">Вход в систему</h2>
             
             <div v-if="!auth.isResetMode.value">
-                <!-- Принудительно светлые фоны -->
                 <input v-model="auth.login.value" type="text" placeholder="Логин (например, user_msk)" class="w-full mb-4 px-4 py-2 bg-white text-emerald-950 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
                 <input v-model="auth.password.value" type="password" @keyup.enter="authenticate" placeholder="Пароль" class="w-full mb-4 px-4 py-2 bg-white text-emerald-950 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
-                <button @click="authenticate" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2 rounded transition text-sm mb-3">Войти</button>
+                <button @click="authenticate" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2 rounded transition text-sm mb-3 cursor-pointer border-0">Войти</button>
                 <div class="text-center">
-                    <button @click="auth.isResetMode.value = true; auth.resetForm.value.success = ''" class="text-xs text-emerald-700 hover:underline">Забыли пароль?</button>
+                    <button @click="auth.isResetMode.value = true; auth.resetForm.value.success = ''" class="text-xs text-emerald-700 hover:underline cursor-pointer bg-transparent border-0">Забыли пароль?</button>
                 </div>
             </div>
             
             <div v-else class="space-y-3">
                 <p class="text-xs text-emerald-800">Введите ваш логин для отправки запроса администратору:</p>
                 <input v-model="auth.resetForm.value.username" type="text" placeholder="Ваш логин" class="w-full px-4 py-2 bg-white text-emerald-950 border border-emerald-300 rounded text-sm focus:outline-none focus:border-emerald-600">
-                <button @click="auth.requestReset" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-medium">Отправить запрос</button>
-                <button @click="auth.isResetMode.value = false" class="w-full bg-emerald-200 hover:bg-emerald-300 text-emerald-900 py-2 rounded text-sm">Назад ко входу</button>
+                <button @click="auth.requestReset" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-medium cursor-pointer border-0">Отправить запрос</button>
+                <button @click="auth.isResetMode.value = false" class="w-full bg-emerald-200 hover:bg-emerald-300 text-emerald-900 py-2 rounded text-sm cursor-pointer border-0">Назад ко входу</button>
                 <p v-if="auth.resetForm.value.success" class="text-xs text-emerald-700 bg-emerald-100 p-2 rounded mt-2 text-center">{{ auth.resetForm.value.success }}</p>
             </div>
             
@@ -270,7 +319,7 @@ const getFileUrl = (fileName) => {
                             • Пользователь: <span class="font-semibold">{{ req.username }}</span> ({{ req.time }})
                         </div>
                     </div>
-                    <button @click="auth.showAdminAlertModal.value = false; switchTab('users')" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-medium">Перейти к управлению</button>
+                    <button @click="auth.showAdminAlertModal.value = false; switchTab('users')" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-medium cursor-pointer border-0">Перейти к управлению</button>
                 </div>
             </div>
 
@@ -286,7 +335,10 @@ const getFileUrl = (fileName) => {
                     <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📥 Импорт файлов</a>
                     <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('trash')" :class="currentTab === 'trash' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🗑️ Корзина</a>
                     <a href="#" @click.prevent="switchTab('schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📅 Расписания</a>
-                    <a href="#" @click.prevent="switchTab('monitoring')" :class="currentTab === 'monitoring' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🖥️ Мониторинг сети</a>
+                    
+                    <!-- БЛОКИРОВКА МЕНЮ ДЛЯ РЕГИОНАЛЬНЫХ -->
+                    <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('monitoring')" :class="currentTab === 'monitoring' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🖥️ Мониторинг сети</a>
+                    
                     <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('reports')" :class="currentTab === 'reports' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📊 Отчёты</a>
                     <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('users')" :class="currentTab === 'users' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">👥 Пользователи <span v-if="users.adminRequests.value.length > 0" class="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-1">{{ users.adminRequests.value.length }}</span></a>
                     <a href="#" @click.prevent="switchTab('profile')" :class="currentTab === 'profile' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">👤 Профиль</a>
@@ -300,7 +352,7 @@ const getFileUrl = (fileName) => {
                         </div>
                         <p class="text-[10px] text-emerald-600">{{ formatSize(media.storageStats.value.used) }} из 100 ГБ</p>
                     </div>
-                    <button @click="requestConfirm($event, 'Вы действительно хотите выйти из системы?', logoutHandler)" class="w-full bg-red-100 hover:bg-red-200 text-red-800 border border-red-300 px-4 py-2 rounded-lg text-sm transition font-medium text-center">Выйти</button>
+                    <button @click="requestConfirm($event, 'Вы действительно хотите выйти из системы?', logoutHandler)" class="w-full bg-red-100 hover:bg-red-200 text-red-800 border border-red-300 px-4 py-2 rounded-lg text-sm transition font-medium text-center cursor-pointer border-0">Выйти</button>
                 </div>
             </aside>
 
@@ -312,8 +364,8 @@ const getFileUrl = (fileName) => {
                         <div class="flex justify-between items-center mb-6">
                             <h2 class="text-xl font-semibold text-emerald-900">Управление учетными записями</h2>
                             <div class="flex gap-2">
-                                <button @click="users.showAddUserModal.value = true" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-md font-medium shadow-sm">+ Новый пользователь</button>
-                                <button @click="users.fetchAdminUsers" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium">Обновить</button>
+                                <button @click="users.showAddUserModal.value = true" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-md font-medium shadow-sm cursor-pointer border-0">+ Новый пользователь</button>
+                                <button @click="users.fetchAdminUsers" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium cursor-pointer border-0">Обновить</button>
                             </div>
                         </div>
 
@@ -322,22 +374,22 @@ const getFileUrl = (fileName) => {
                             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                                 <div>
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Логин (Username)</label>
-                                    <input v-model="users.newUserForm.value.username" type="text" placeholder="Например: user_kazan" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                    <input v-model="users.newUserForm.value.username" type="text" placeholder="Например: user_kazan" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                 </div>
                                 <div>
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Первичный пароль</label>
-                                    <input v-model="users.newUserForm.value.password" type="text" placeholder="Пароль для входа" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                    <input v-model="users.newUserForm.value.password" type="text" placeholder="Пароль для входа" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                 </div>
                                 <div>
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Роль</label>
-                                    <select v-model="users.newUserForm.value.role" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                    <select v-model="users.newUserForm.value.role" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                         <option value="regional">Региональный (Филиал)</option>
                                         <option value="admin">Администратор (Полный доступ)</option>
                                     </select>
                                 </div>
                                 <div>
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
-                                    <select v-model="users.newUserForm.value.city_id" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                    <select v-model="users.newUserForm.value.city_id" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                         <option value="global">Глобальная сеть (Все города)</option>
                                         <option value="moscow">Москва</option>
                                         <option value="spb">Санкт-Петербург</option>
@@ -350,8 +402,8 @@ const getFileUrl = (fileName) => {
                                 </div>
                             </div>
                             <div class="flex justify-end gap-3">
-                                <button @click="users.showAddUserModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm">Отмена</button>
-                                <button @click="users.createUser" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm">Создать пользователя</button>
+                                <button @click="users.showAddUserModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm cursor-pointer border-0">Отмена</button>
+                                <button @click="users.createUser" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm cursor-pointer border-0">Создать пользователя</button>
                             </div>
                         </div>
 
@@ -363,7 +415,7 @@ const getFileUrl = (fileName) => {
                                         <p class="font-semibold text-emerald-900">Пользователь: <span class="text-emerald-700 font-bold">{{ req.username }}</span></p>
                                         <p class="text-slate-500 text-[10px]">Время запроса: {{ req.time }}</p>
                                     </div>
-                                    <button @click="requestConfirm($event, `Сбросить пароль для ${req.username}?`, () => users.forceReset(req.username))" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded transition font-medium">Выдать новый пароль</button>
+                                    <button @click="requestConfirm($event, `Сбросить пароль для ${req.username}?`, () => users.forceReset(req.username))" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-1.5 rounded transition font-medium cursor-pointer border-0">Выдать новый пароль</button>
                                 </div>
                             </div>
                         </div>
@@ -384,8 +436,8 @@ const getFileUrl = (fileName) => {
                                         <td class="px-6 py-4">{{ info.role === 'admin' ? 'Администратор' : 'Региональный' }}</td>
                                         <td class="px-6 py-4">{{ info.city_id }}</td>
                                         <td class="px-6 py-4 flex gap-2">
-                                            <button @click="requestConfirm($event, `Сбросить пароль для ${uname}?`, () => users.forceReset(uname))" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded transition">Сбросить пароль</button>
-                                            <button v-if="uname !== auth.login.value" @click="requestConfirm($event, `Точно удалить пользователя ${uname}?`, () => users.deleteUser(uname))" class="bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition">Удалить</button>
+                                            <button @click="requestConfirm($event, `Сбросить пароль для ${uname}?`, () => users.forceReset(uname))" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded transition cursor-pointer border-0">Сбросить пароль</button>
+                                            <button v-if="uname !== auth.login.value" @click="requestConfirm($event, `Точно удалить пользователя ${uname}?`, () => users.deleteUser(uname))" class="bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition cursor-pointer">Удалить</button>
                                         </td>
                                     </tr>
                                 </tbody>
@@ -405,12 +457,11 @@ const getFileUrl = (fileName) => {
                         </div>
                         <div class="p-5 bg-white rounded-lg border border-emerald-200">
                             <h3 class="font-medium text-emerald-900 mb-4">Смена пароля</h3>
-                            <!-- ПРИНУДИТЕЛЬНЫЙ СВЕТЛЫЙ ФОН: bg-white text-emerald-950 -->
                             <input v-model="profileForm.oldPassword" type="password" placeholder="Текущий пароль" class="w-full mb-3 px-4 py-2 bg-white text-emerald-950 placeholder-gray-400 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
                             <input v-model="profileForm.newPassword" type="password" placeholder="Новый пароль" class="w-full mb-3 px-4 py-2 bg-white text-emerald-950 placeholder-gray-400 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
                             <input v-model="profileForm.confirmPassword" type="password" placeholder="Повторите новый пароль" class="w-full mb-4 px-4 py-2 bg-white text-emerald-950 placeholder-gray-400 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
                             
-                            <button @click="updatePassword" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm transition font-medium">Сохранить новый пароль</button>
+                            <button @click="updatePassword" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm transition font-medium cursor-pointer border-0">Сохранить новый пароль</button>
                             <p v-if="profileForm.error" class="mt-3 text-red-600 text-sm">{{ profileForm.error }}</p>
                             <p v-if="profileForm.success" class="mt-3 text-emerald-600 text-sm font-medium">{{ profileForm.success }}</p>
                         </div>
@@ -422,11 +473,11 @@ const getFileUrl = (fileName) => {
                     <section class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                         <div class="flex justify-between items-center mb-6">
                             <h2 class="text-xl font-semibold text-emerald-900">Интерфейс управления контентом</h2>
-                            <button @click="media.fetchFiles(); media.fetchStats()" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium">Обновить</button>
+                            <button @click="media.fetchFiles(); media.fetchStats()" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium cursor-pointer border-0">Обновить</button>
                         </div>
                         <div class="flex flex-col md:flex-row gap-3 mb-6 bg-white p-4 rounded-lg border border-emerald-200 shadow-sm">
-                            <input v-model="media.searchQuery.value" type="text" placeholder="Поиск по имени файла..." class="flex-1 bg-white border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
-                            <select v-if="auth.login.value === 'admin_main'" v-model="media.filterCity.value" class="w-full md:w-48 bg-white border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
+                            <input v-model="media.searchQuery.value" type="text" placeholder="Поиск по имени файла..." class="flex-1 bg-white text-emerald-950 border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
+                            <select v-if="auth.login.value === 'admin_main'" v-model="media.filterCity.value" class="w-full md:w-48 bg-white text-emerald-950 border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
                                 <option value="all">Все папки офисов</option>
                                 <option value="global">Глобальная (global)</option>
                                 <option value="moscow">Москва</option>
@@ -437,7 +488,7 @@ const getFileUrl = (fileName) => {
                                 <option value="orenburg">Оренбург</option>
                                 <option value="chernyakhovsk">Черняховск</option>
                             </select>
-                            <select v-model="media.sortBy.value" class="w-full md:w-56 bg-white border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
+                            <select v-model="media.sortBy.value" class="w-full md:w-56 bg-white text-emerald-950 border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
                                 <option value="date_desc">Сначала новые</option>
                                 <option value="date_asc">Сначала старые</option>
                                 <option value="name_asc">По имени (А - Я)</option>
@@ -462,8 +513,8 @@ const getFileUrl = (fileName) => {
                                     </div>
                                 </div>
                                 <div class="flex gap-2 mt-auto">
-                                    <a :href="file.url" target="_blank" class="flex-1 text-center bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded transition font-medium">Смотреть</a>
-                                    <button v-if="auth.login.value === 'admin_main'" @click="requestConfirm($event, 'Переместить файл в корзину?', () => media.deleteFile(file.name))" class="flex-1 bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition">В корзину</button>
+                                    <a :href="file.url" target="_blank" class="flex-1 text-center bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded transition font-medium cursor-pointer">Смотреть</a>
+                                    <button v-if="auth.login.value === 'admin_main'" @click="requestConfirm($event, 'Переместить файл в корзину?', () => media.deleteFile(file.name))" class="flex-1 bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition cursor-pointer">В корзину</button>
                                 </div>
                             </div>
                         </div>
@@ -474,7 +525,7 @@ const getFileUrl = (fileName) => {
                 <div v-if="currentTab === 'playlists' && auth.login.value === 'admin_main'" class="space-y-6">
                     <div class="flex justify-between items-center">
                         <h2 class="text-xl font-semibold text-emerald-900">Управление плейлистами (Фото/Видео ряды)</h2>
-                        <button @click="playlists.showPlaylistModal.value = true" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm">+ Создать плейлист</button>
+                        <button @click="playlists.showPlaylistModal.value = true" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Создать плейлист</button>
                     </div>
 
                     <div v-if="playlists.showPlaylistModal.value" class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-md">
@@ -482,11 +533,11 @@ const getFileUrl = (fileName) => {
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                             <div>
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">Название плейлиста</label>
-                                <input v-model="playlists.newPlaylist.value.name" type="text" placeholder="Например: Утренний показ" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                <input v-model="playlists.newPlaylist.value.name" type="text" placeholder="Например: Утренний показ" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                             </div>
                             <div>
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
-                                <select v-model="playlists.newPlaylist.value.city" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                <select v-model="playlists.newPlaylist.value.city" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                     <option value="global">Вся сеть</option>
                                     <option value="moscow">Москва</option>
                                     <option value="spb">Санкт-Петербург</option>
@@ -499,21 +550,21 @@ const getFileUrl = (fileName) => {
                             </div>
                             <div>
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">Пауза между файлами (сек)</label>
-                                <input v-model.number="playlists.newPlaylist.value.interval" type="number" min="0" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                <input v-model.number="playlists.newPlaylist.value.interval" type="number" min="0" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                             </div>
                             <div>
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">Количество повторов</label>
-                                <input v-model.number="playlists.newPlaylist.value.repeats" type="number" min="1" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm">
+                                <input v-model.number="playlists.newPlaylist.value.repeats" type="number" min="1" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                             </div>
                         </div>
 
                         <div class="bg-white p-4 rounded-lg border border-emerald-200 mb-4">
                             <h4 class="text-xs font-semibold text-emerald-900 mb-2">Состав плейлиста:</h4>
                             <div class="flex gap-2 mb-3">
-                                <select v-model="playlists.selectedFileToAdd.value" class="flex-1 bg-white border border-emerald-300 rounded p-2 text-sm">
+                                <select v-model="playlists.selectedFileToAdd.value" class="flex-1 bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                     <option v-for="f in media.files.value" :key="f.name" :value="f.name">{{ f.name }}</option>
                                 </select>
-                                <button @click="playlists.addFileToPlaylist" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm">Добавить файл</button>
+                                <button @click="playlists.addFileToPlaylist" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm cursor-pointer border-0">Добавить файл</button>
                             </div>
 
                             <div v-if="playlists.newPlaylist.value.items.length === 0" class="text-xs text-emerald-600 py-4 text-center">Плейлист пока пуст. Добавьте файлы.</div>
@@ -521,8 +572,8 @@ const getFileUrl = (fileName) => {
                                 <div v-for="(item, idx) in playlists.newPlaylist.value.items" :key="idx" class="flex items-center justify-between bg-emerald-50/50 p-2.5 rounded border border-emerald-200 text-xs">
                                     <div class="flex items-center gap-2">
                                         <div class="flex flex-col gap-0.5">
-                                            <button @click="playlists.movePlaylistItem(idx, -1)" :disabled="idx === 0" class="text-[10px] bg-white border px-1 rounded disabled:opacity-30 hover:bg-emerald-100">▲</button>
-                                            <button @click="playlists.movePlaylistItem(idx, 1)" :disabled="idx === playlists.newPlaylist.value.items.length - 1" class="text-[10px] bg-white border px-1 rounded disabled:opacity-30 hover:bg-emerald-100">▼</button>
+                                            <button @click="playlists.movePlaylistItem(idx, -1)" :disabled="idx === 0" class="text-[10px] bg-white border px-1 rounded disabled:opacity-30 hover:bg-emerald-100 cursor-pointer">▲</button>
+                                            <button @click="playlists.movePlaylistItem(idx, 1)" :disabled="idx === playlists.newPlaylist.value.items.length - 1" class="text-[10px] bg-white border px-1 rounded disabled:opacity-30 hover:bg-emerald-100 cursor-pointer">▼</button>
                                         </div>
                                         <span class="font-bold text-emerald-800 ml-1">#{{ idx + 1 }}</span>
                                         <span class="font-medium text-emerald-950">{{ item.file }}</span>
@@ -532,18 +583,18 @@ const getFileUrl = (fileName) => {
                                     <div class="flex items-center gap-3">
                                         <div v-if="isImage(item.file)" class="flex items-center gap-1.5">
                                             <span class="text-emerald-700">Время показа (сек):</span>
-                                            <input v-model.number="item.duration" type="number" min="1" class="w-16 bg-white border border-emerald-300 rounded p-1 text-center">
+                                            <input v-model.number="item.duration" type="number" min="1" class="w-16 bg-white text-emerald-950 border border-emerald-300 rounded p-1 text-center focus:outline-none focus:border-emerald-600">
                                         </div>
                                         <div v-else class="text-slate-500 italic">Длительность: по видеоряду</div>
-                                        <button @click="playlists.removePlaylistItem(idx)" class="text-red-600 hover:text-red-800 font-bold px-2 py-1 bg-red-50 rounded border border-red-200">✕</button>
+                                        <button @click="playlists.removePlaylistItem(idx)" class="text-red-600 hover:text-red-800 font-bold px-2 py-1 bg-red-50 rounded border border-red-200 cursor-pointer">✕</button>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
                         <div class="flex justify-end gap-3">
-                            <button @click="playlists.showPlaylistModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm">Отмена</button>
-                            <button @click="playlists.savePlaylist" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm">Сохранить плейлист</button>
+                            <button @click="playlists.showPlaylistModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition cursor-pointer border-0">Отмена</button>
+                            <button @click="playlists.savePlaylist" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm hover:bg-emerald-700 transition cursor-pointer border-0">Сохранить плейлист</button>
                         </div>
                     </div>
 
@@ -552,7 +603,7 @@ const getFileUrl = (fileName) => {
                         <div class="bg-white rounded-xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col border border-emerald-300">
                             <div class="bg-emerald-800 text-white px-4 py-3 flex justify-between items-center">
                                 <h3 class="font-semibold text-sm">Предпросмотр плейлиста: {{ playlists.previewPlaylistName.value }}</h3>
-                                <button @click="playlists.closePreview" class="text-white hover:text-gray-200 font-bold text-lg">✕</button>
+                                <button @click="playlists.closePreview" class="text-white hover:text-gray-200 font-bold text-lg cursor-pointer border-0 bg-transparent">✕</button>
                             </div>
                             <div class="p-6 flex flex-col items-center justify-center bg-black min-h-[350px] relative">
                                 <div v-if="playlists.previewCurrentItem.value">
@@ -565,7 +616,7 @@ const getFileUrl = (fileName) => {
                             </div>
                             <div class="bg-gray-100 px-4 py-3 flex justify-between items-center">
                                 <span class="text-xs text-gray-600">Эмуляция экрана вещания с учетом пауз и длительности</span>
-                                <button @click="playlists.closePreview" class="bg-gray-300 hover:bg-gray-400 text-gray-800 text-xs px-4 py-2 rounded font-medium">Закрыть предпросмотр</button>
+                                <button @click="playlists.closePreview" class="bg-gray-300 hover:bg-gray-400 text-gray-800 text-xs px-4 py-2 rounded font-medium cursor-pointer border-0">Закрыть предпросмотр</button>
                             </div>
                         </div>
                     </div>
@@ -586,8 +637,8 @@ const getFileUrl = (fileName) => {
                                     </ul>
                                 </div>
                                 <div class="mt-4 pt-3 border-t border-emerald-100 flex justify-between items-center">
-                                    <button @click="playlists.startPreview(pl)" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded font-medium transition">▶ Предпросмотр</button>
-                                    <button v-if="auth.login.value === 'admin_main'" @click="requestConfirm($event, 'Удалить этот плейлист?', () => playlists.deletePlaylist(pl.id))" class="text-red-600 hover:text-red-800 text-xs font-medium">Удалить</button>
+                                    <button @click="playlists.startPreview(pl)" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded font-medium transition cursor-pointer border-0">▶ Предпросмотр</button>
+                                    <button v-if="auth.login.value === 'admin_main'" @click="requestConfirm($event, 'Удалить этот плейлист?', () => playlists.deletePlaylist(pl.id))" class="text-red-600 hover:text-red-800 text-xs font-medium cursor-pointer bg-transparent border-0 hover:underline">Удалить</button>
                                 </div>
                             </div>
                         </div>
@@ -605,7 +656,7 @@ const getFileUrl = (fileName) => {
                                 <h3 class="text-sm font-semibold text-emerald-900">Параметры</h3>
                                 <div>
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Целевой филиал:</label>
-                                    <select v-model="media.selectedCity.value" class="w-full bg-white border border-emerald-300 text-sm rounded-lg p-2.5 focus:outline-none focus:border-emerald-600">
+                                    <select v-model="media.selectedCity.value" class="w-full bg-white text-emerald-950 border border-emerald-300 text-sm rounded-lg p-2.5 focus:outline-none focus:border-emerald-600">
                                         <option value="global">Вся сеть (Все города)</option>
                                         <option value="moscow">Москва</option>
                                         <option value="spb">Санкт-Петербург</option>
@@ -623,7 +674,7 @@ const getFileUrl = (fileName) => {
                                 <div v-if="media.uploading.value" class="w-full bg-emerald-100 rounded-full h-2">
                                   <div class="bg-emerald-600 h-2 rounded-full transition-all duration-300" :style="{ width: media.uploadProgress.value + '%' }"></div>
                                 </div>
-                                <button @click="media.uploadFile" :disabled="!media.selectedFile.value || media.uploading.value" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-medium px-4 py-2.5 rounded-lg transition text-sm">
+                                <button @click="media.uploadFile" :disabled="!media.selectedFile.value || media.uploading.value" class="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-medium px-4 py-2.5 rounded-lg transition text-sm cursor-pointer border-0">
                                     {{ media.uploading.value ? `Загрузка... ${media.uploadProgress.value}%` : 'Начать импорт' }}
                                 </button>
                                 <p v-if="media.uploadError.value" class="text-red-600 text-xs mt-2">{{ media.uploadError.value }}</p>
@@ -653,7 +704,7 @@ const getFileUrl = (fileName) => {
                             <button 
                                 @click="media.trashFiles.value.length > 0 ? requestConfirm($event, 'Очистить корзину навсегда?', media.emptyTrash) : showToast('Корзина уже пуста!', 'info')" 
                                 :class="media.trashFiles.value.length === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-red-200 cursor-pointer'" 
-                                class="text-xs bg-red-100 text-red-800 px-4 py-2 rounded-md border border-red-200 font-bold transition">
+                                class="text-xs bg-red-100 text-red-800 px-4 py-2 rounded-md border border-red-200 font-bold transition border-0">
                                 🗑️ Очистить всё
                             </button>
                         </div>
@@ -667,7 +718,7 @@ const getFileUrl = (fileName) => {
                                         <span class="font-semibold text-amber-700">{{ getRemainingDays(file.deleted_at) }}</span>
                                     </p>
                                 </div>
-                                <button @click="media.restoreFile(file.name)" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 rounded-md shadow-sm">Восстановить</button>
+                                <button @click="media.restoreFile(file.name)" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 rounded-md shadow-sm cursor-pointer border-0">Восстановить</button>
                             </div>
                         </div>
                     </div>
@@ -695,10 +746,11 @@ const getFileUrl = (fileName) => {
 
                             <div class="sm:col-span-2">
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">{{ schedules.scheduleType.value === 'file' ? 'Выберите файл' : 'Выберите плейлист' }}</label>
-                                <select v-if="schedules.scheduleType.value === 'file'" v-model="schedules.newSchedule.value.file" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
+                                <select v-if="schedules.scheduleType.value === 'file'" v-model="schedules.newSchedule.value.file" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
+                                    <option value="">-- Выберите файл --</option>
                                     <option v-for="f in media.files.value" :key="f.name" :value="f.name">{{ f.name }}</option>
                                 </select>
-                                <select v-else v-model="schedules.newSchedule.value.playlist_id" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
+                                <select v-else v-model="schedules.newSchedule.value.playlist_id" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
                                     <option :value="null">-- Выберите плейлист --</option>
                                     <option v-for="pl in playlists.playlists.value" :key="pl.id" :value="pl.id">📑 {{ pl.name }}</option>
                                 </select>
@@ -706,7 +758,7 @@ const getFileUrl = (fileName) => {
 
                             <div class="sm:col-span-2">
                                 <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
-                                <select v-model="schedules.newSchedule.value.city" @change="handleCityChange" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm">
+                                <select v-model="schedules.newSchedule.value.city" @change="handleCityChange" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
                                     <option value="global">Вся сеть</option>
                                     <option value="moscow">Москва</option>
                                     <option value="spb">Санкт-Петербург</option>
@@ -716,9 +768,16 @@ const getFileUrl = (fileName) => {
                                     <option value="orenburg">Оренбург</option>
                                     <option value="chernyakhovsk">Черняховск</option>
                                 </select>
+                                
+                                <div class="mt-2 p-2 bg-emerald-100 border border-emerald-200 rounded flex items-center gap-2 text-xs text-emerald-800 shadow-inner">
+                                    <span>🌍</span>
+                                    <span>
+                                        Часовой пояс: <strong>{{ cityTimezones[schedules.newSchedule.value.city || 'global']?.label || 'МСК' }}</strong>. 
+                                        Текущее время в филиале: <strong class="text-emerald-950 text-[13px] font-mono">{{ localCityTimeDisplay }}</strong>
+                                    </span>
+                                </div>
                             </div>
 
-                            <!-- БЛОК ВЫБОРА ЦЕЛЕВЫХ ЭКРАНОВ -->
                             <div v-if="schedules.newSchedule.value.city && schedules.newSchedule.value.city !== 'global' && currentScreens.length > 0" class="sm:col-span-2 bg-emerald-100/50 p-4 rounded-lg border border-emerald-200">
                                 <div class="flex justify-between items-center mb-2">
                                     <label class="block text-xs font-semibold text-emerald-800">Целевые экраны:</label>
@@ -733,17 +792,17 @@ const getFileUrl = (fileName) => {
                             </div>
                             
                             <div>
-                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Время начала</label>
-                                <input id="time_start_picker" type="text" placeholder="Выберите дату и время" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm cursor-pointer">
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Время начала (Местное время филиала)</label>
+                                <input id="time_start_picker" type="text" placeholder="Выберите дату и время" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm cursor-pointer focus:outline-none focus:border-emerald-600">
                             </div>
                             <div>
-                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Время окончания</label>
-                                <input id="time_end_picker" type="text" placeholder="Выберите дату и время" class="w-full bg-white border border-emerald-300 rounded p-2 text-sm cursor-pointer">
+                                <label class="block text-xs text-emerald-700 mb-1 font-medium">Время окончания (Местное время филиала)</label>
+                                <input id="time_end_picker" type="text" placeholder="Выберите дату и время" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm cursor-pointer focus:outline-none focus:border-emerald-600">
                             </div>
                         </div>
                         <div class="flex justify-end gap-3 pt-2">
-                            <button @click="schedules.showAddModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition">Отмена</button>
-                            <button @click="schedules.addSchedule($event)" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm hover:bg-emerald-700 transition">Сохранить</button>
+                            <button @click="schedules.showAddModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition cursor-pointer border-0">Отмена</button>
+                            <button @click="schedules.addSchedule($event)" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm hover:bg-emerald-700 transition cursor-pointer border-0">Сохранить</button>
                         </div>
                     </div>
                     
@@ -773,8 +832,13 @@ const getFileUrl = (fileName) => {
                                         <span class="text-[10px] text-slate-500 font-normal lowercase">{{ !item.screens || item.screens.length === 0 ? 'Все экраны' : item.screens.join(', ') }}</span>
                                     </td>
                                     <td class="px-6 py-4 text-[11px] leading-tight">
-                                        С: {{ item.time_start.replace('T', ' ') }}<br>
-                                        По: {{ item.time_end.replace('T', ' ') }}
+                                        <div class="flex flex-col gap-0.5">
+                                            <span>С: {{ item.time_start.replace('T', ' ') }}</span>
+                                            <span>По: {{ item.time_end.replace('T', ' ') }}</span>
+                                            <span class="mt-1 bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded w-max text-[9px] font-bold shadow-sm">
+                                                Пояс: {{ cityTimezones[item.city]?.label || 'МСК' }}
+                                            </span>
+                                        </div>
                                     </td>
                                     <td class="px-6 py-4">
                                         <span class="px-2.5 py-1 rounded text-xs font-medium" :class="{
@@ -795,11 +859,10 @@ const getFileUrl = (fileName) => {
                     </div>
                 </div>
 
-                <!-- ВКЛАДКА МОНИТОРИНГ (С ПЛЕЕРОМ ТРАНСЛЯЦИЙ - ЭТАП 9) -->
-                <div v-if="currentTab === 'monitoring'">
+                <!-- БЛОКИРОВКА ВКЛАДКИ МОНИТОРИНГА НА СТОРОНЕ ФРОНТЕНДА -->
+                <div v-if="currentTab === 'monitoring' && auth.login.value === 'admin_main'">
                     <div class="space-y-6">
                         
-                        <!-- Блок 1: Статусы сети -->
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-6">
                                 <h2 class="text-xl font-semibold text-emerald-900">Мониторинг сети экранов</h2>
@@ -819,14 +882,14 @@ const getFileUrl = (fileName) => {
                             </div>
                         </div>
 
-                        <!-- Блок 2: Плеер трансляций (Эмуляция эфира) -->
+                        <!-- Плеер трансляций -->
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <h2 class="text-xl font-semibold text-emerald-900 mb-4">Плеер трансляций (Эфир экранов)</h2>
                             
                             <div class="flex flex-col md:flex-row gap-4 mb-6">
                                 <div class="flex-1">
                                     <label class="block text-xs font-semibold text-emerald-800 mb-1">Город</label>
-                                    <select v-model="monitorSelectedCity" @change="handleMonitorCityChange" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
+                                    <select v-model="monitorSelectedCity" @change="handleMonitorCityChange" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
                                         <option value="moscow">Москва</option>
                                         <option value="spb">Санкт-Петербург</option>
                                         <option value="novocheboksarsk">Новочебоксарск</option>
@@ -838,7 +901,7 @@ const getFileUrl = (fileName) => {
                                 </div>
                                 <div class="flex-1">
                                     <label class="block text-xs font-semibold text-emerald-800 mb-1">Экран</label>
-                                    <select v-model="monitorSelectedScreen" class="w-full bg-white border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
+                                    <select v-model="monitorSelectedScreen" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
                                         <option v-for="scr in (schedules.allScreensMap?.value?.[monitorSelectedCity] || fallbackScreens[monitorSelectedCity] || [])" :key="scr" :value="scr">{{ scr }}</option>
                                     </select>
                                 </div>
@@ -850,7 +913,6 @@ const getFileUrl = (fileName) => {
                                     <span class="text-sm font-medium tracking-wide">Нет активной трансляции</span>
                                 </div>
                                 <div v-else class="w-full h-full relative group">
-                                    
                                     <div class="absolute inset-0 flex items-center justify-center z-0">
                                         <div v-if="activeMonitorSchedule.playlist_id" class="text-white text-center">
                                             <span class="text-6xl block mb-4">📑</span>
@@ -867,7 +929,6 @@ const getFileUrl = (fileName) => {
                                             </div>
                                         </div>
                                     </div>
-                                    
                                     <div class="absolute top-4 left-4 bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-2">
                                         <div class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
                                         <span class="text-white text-xs font-semibold tracking-wider">LIVE эфир</span>
@@ -910,12 +971,12 @@ const getFileUrl = (fileName) => {
                             </div>
                         </div>
 
-                        <!-- Системный журнал событий -->
+                        <!-- СИСТЕМНЫЙ ЖУРНАЛ СОБЫТИЙ -->
                         <div class="bg-white border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-4">
                                 <div>
                                     <h3 class="text-emerald-900 font-semibold">Системный журнал событий</h3>
-                                    <p class="text-xs text-emerald-600 mt-0.5">Фиксация действий пользователей, системы и операций с файлами</p>
+                                    <p class="text-xs text-emerald-600 mt-0.5">Фиксация действий пользователей, входов в систему и операций с файлами</p>
                                 </div>
                                 <button @click="reports.fetchHistory" class="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 px-3 py-1.5 rounded-md font-medium transition cursor-pointer border-0">Обновить журнал</button>
                             </div>
@@ -937,7 +998,11 @@ const getFileUrl = (fileName) => {
                                             <td class="px-4 py-3 text-slate-500 whitespace-nowrap">{{ formatDate(log.timestamp, true) }}</td>
                                             <td class="px-4 py-3 font-semibold text-emerald-900">{{ log.username }}</td>
                                             <td class="px-4 py-3 font-medium text-emerald-700">
-                                                <span class="bg-emerald-100 text-emerald-900 px-2 py-0.5 rounded text-[11px]">{{ log.action }}</span>
+                                                <span :class="{
+                                                    'bg-blue-100 text-blue-900': log.action === 'Вход',
+                                                    'bg-slate-200 text-slate-800': log.action === 'Выход',
+                                                    'bg-emerald-100 text-emerald-900': log.action !== 'Вход' && log.action !== 'Выход'
+                                                }" class="px-2 py-0.5 rounded text-[11px] font-bold">{{ log.action }}</span>
                                             </td>
                                             <td class="px-4 py-3 text-slate-600">{{ log.details }}</td>
                                         </tr>
