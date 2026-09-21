@@ -11,6 +11,8 @@ import mimetypes
 import base64
 import urllib.parse
 import socket
+import hmac
+import hashlib
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
@@ -37,7 +39,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.\d+\.\d+\.\d+)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,6 +69,19 @@ DB_FILE = "cms.db"
 ALLOWED_EXTENSIONS = {'mp4', 'mov', 'mkv', 'webm', 'avi', 'jpeg', 'jpg', 'png', 'webp', 'gif', 'svg', 'heic'}
 
 upload_lock = threading.Lock()
+
+# ==========================================
+# КРИПТОГРАФИЯ И БЕЗОПАСНОСТЬ QR-КОДОВ
+# ==========================================
+# Секретный ключ для подписи QR-кодов (его нельзя узнать из браузера)
+SECRET_KEY = os.getenv("CMS_SECRET_KEY", "super_secret_production_key_2026")
+
+def generate_qr_hash(schedule_id: int) -> str:
+    """Генерирует криптографическую подпись для конкретной трансляции"""
+    msg = f"signage_{schedule_id}".encode('utf-8')
+    key = SECRET_KEY.encode('utf-8')
+    # Используем HMAC с алгоритмом SHA-256
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 # ==========================================
 # МОДЕЛИ ДАННЫХ (PYDANTIC)
@@ -397,11 +412,12 @@ def get_monitoring(current_user: dict = Depends(get_current_user)):
 
 @app.get("/public-broadcast/{schedule_id}")
 def get_public_broadcast(schedule_id: int, hash: str):
-    expected_string = f"signage_{schedule_id}_secure".encode('utf-8')
-    expected_hash = base64.b64encode(expected_string).decode('utf-8')
+    # Генерируем ожидаемый хэш на стороне сервера
+    expected_hash = generate_qr_hash(schedule_id)
     
-    if hash != expected_hash:
-        raise HTTPException(status_code=403, detail="Доступ запрещен. Неверный ключ.")
+    # hmac.compare_digest защищает от атак по времени (timing attacks)
+    if not hmac.compare_digest(hash, expected_hash):
+        raise HTTPException(status_code=403, detail="Доступ запрещен. Неверная криптографическая подпись.")
         
     with closing(get_db_connection()) as conn:
         s = conn.execute('SELECT * FROM schedules WHERE id = ?', (schedule_id,)).fetchone()
@@ -778,6 +794,10 @@ def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depend
             s = dict(row)
             s["screens"] = json.loads(s["screens"]) if s["screens"] else []
             s["status"] = get_dynamic_status(s.get("time_start"), s.get("time_end"), s.get("city", "global"))
+            
+            # НОВОЕ: Добавляем крипто-подпись к каждому расписанию
+            s["qr_hash"] = generate_qr_hash(s["id"]) 
+            
             schedules.append(s)
             
     if current_user["role"] != "admin":

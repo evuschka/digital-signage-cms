@@ -195,7 +195,7 @@ const showQrModal = ref(false);
 const currentQrUrl = ref('');
 
 const openQr = async (schedule) => {
-    const hash = btoa(`signage_${schedule.id}_secure`); 
+    const hash = schedule.qr_hash; 
     let host = window.location.hostname;
     
     if (host === 'localhost' || host === '127.0.0.1') {
