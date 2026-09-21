@@ -6,7 +6,6 @@ import sqlite3
 import bcrypt
 import secrets
 import logging
-import threading
 import mimetypes
 import base64
 import urllib.parse
@@ -68,19 +67,15 @@ MAX_STORAGE_BYTES = 100 * 1024 * 1024 * 1024
 DB_FILE = "cms.db"
 ALLOWED_EXTENSIONS = {'mp4', 'mov', 'mkv', 'webm', 'avi', 'jpeg', 'jpg', 'png', 'webp', 'gif', 'svg', 'heic'}
 
-upload_lock = threading.Lock()
-
 # ==========================================
 # КРИПТОГРАФИЯ И БЕЗОПАСНОСТЬ QR-КОДОВ
 # ==========================================
-# Секретный ключ для подписи QR-кодов (его нельзя узнать из браузера)
 SECRET_KEY = os.getenv("CMS_SECRET_KEY", "super_secret_production_key_2026")
 
 def generate_qr_hash(schedule_id: int) -> str:
     """Генерирует криптографическую подпись для конкретной трансляции"""
     msg = f"signage_{schedule_id}".encode('utf-8')
     key = SECRET_KEY.encode('utf-8')
-    # Используем HMAC с алгоритмом SHA-256
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 # ==========================================
@@ -178,6 +173,16 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_schedules_time ON schedules (time_start, time_end);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_playlists_city ON playlists (city);')
         
+        row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+        if not row:
+            initial_size = 0
+            try:
+                response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
+                initial_size = sum(obj['Size'] for obj in response.get('Contents', []) if not obj['Key'].startswith('trash/'))
+            except Exception:
+                pass
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(initial_size),))
+
         cursor.execute('SELECT COUNT(*) FROM users')
         if cursor.fetchone()[0] == 0:
             for uname, udata in DEFAULT_USERS.items():
@@ -204,7 +209,6 @@ def clean_old_records_sqlite():
         cursor = conn.cursor()
         now = datetime.now()
         
-        # 1. Возвращаем 365 дней (храним трансляции в базе для Архива 1 год)
         cursor.execute('SELECT id, time_end FROM schedules')
         for row in cursor.fetchall():
             try:
@@ -213,7 +217,6 @@ def clean_old_records_sqlite():
             except ValueError:
                 pass
                 
-        # 2. Очистка корзины (удаляем файлы, лежащие дольше 30 дней)
         cursor.execute('SELECT id, deleted_at FROM trash')
         for row in cursor.fetchall():
             try:
@@ -241,15 +244,12 @@ def get_dynamic_status(start_str, end_str, city):
         return "Ошибка даты"
 
 def get_total_bucket_size():
-    try:
-        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
-        return sum(obj['Size'] for obj in response.get('Contents', []))
-    except ClientError as e:
-        logger.error(f"S3 connection error: {e}")
-        return 0
+    with closing(get_db_connection()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+        return int(row["value"]) if row and row["value"] else 0
 
 # ==========================================
-# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ
+# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ (ЕДИНСТВЕННЫЙ АДМИН)
 # ==========================================
 def get_current_user(request: Request):
     auth = request.headers.get("Authorization")
@@ -307,25 +307,38 @@ def get_admin_users(current_user: dict = Depends(get_current_user)):
 def create_user(data: UserCreate, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403)
+    
+    # ЗАЩИТА: В системе может быть только 1 единственный главный администратор
+    if data.role == "admin":
+        raise HTTPException(status_code=400, detail="В системе предусмотрен только один главный администратор.")
+
     with closing(get_db_connection()) as conn:
         if conn.execute('SELECT * FROM users WHERE username = ?', (data.username,)).fetchone():
             raise HTTPException(status_code=400, detail="Пользователь уже существует")
         conn.execute('INSERT INTO users (username, password, role, city_id) VALUES (?, ?, ?, ?)',
-                     (data.username, get_password_hash(data.password), data.role, data.city_id))
+                     (data.username, get_password_hash(data.password), "regional", data.city_id))
         conn.commit()
-    log_action(current_user["username"], "Создание пользователя", f"Логин: {data.username}, Роль: {data.role}")
-    return {"message": "Пользователь успешно создан"}
+        
+    log_action(current_user["username"], "Создание пользователя", f"Логин: {data.username}, Филиал: {data.city_id}")
+    return {"message": "Региональный пользователь успешно создан"}
 
 @app.delete("/admin/users/{username}")
 def delete_user(username: str, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403)
+        
+    # ЗАЩИТА: Нельзя удалить главного администратора системы
+    if username == "admin_main":
+        raise HTTPException(status_code=400, detail="Нельзя удалить главного администратора системы!")
+        
     if username == current_user["username"]:
         raise HTTPException(status_code=400, detail="Нельзя удалить самого себя")
+        
     with closing(get_db_connection()) as conn:
         conn.execute('DELETE FROM users WHERE username = ?', (username,))
         conn.execute('DELETE FROM requests WHERE username = ?', (username,))
         conn.commit()
+        
     log_action(current_user["username"], "Удаление пользователя", f"Логин: {username}")
     return {"message": "Пользователь удален"}
 
@@ -412,10 +425,7 @@ def get_monitoring(current_user: dict = Depends(get_current_user)):
 
 @app.get("/public-broadcast/{schedule_id}")
 def get_public_broadcast(schedule_id: int, hash: str):
-    # Генерируем ожидаемый хэш на стороне сервера
     expected_hash = generate_qr_hash(schedule_id)
-    
-    # hmac.compare_digest защищает от атак по времени (timing attacks)
     if not hmac.compare_digest(hash, expected_hash):
         raise HTTPException(status_code=403, detail="Доступ запрещен. Неверная криптографическая подпись.")
         
@@ -554,31 +564,48 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
     file_size = file.file.tell()
     file.file.seek(0)
     
-    with upload_lock:
-        if get_total_bucket_size() + file_size > MAX_STORAGE_BYTES:
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE;")
+        row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+        current_used = int(row["value"]) if row else 0
+        
+        if current_used + file_size > MAX_STORAGE_BYTES:
+            conn.rollback()
             raise HTTPException(status_code=400, detail="Превышен лимит хранилища в 100 ГБ")
         
-        folder = target_city if target_city else "global"
+        new_used = current_used + file_size
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
+        conn.commit()
+    
+    folder = target_city if target_city else "global"
+    file_key = f"{folder}/{filename}"
+    
+    try:
+        s3_client.head_object(Bucket=BUCKET_NAME, Key=file_key)
+        name, ex = os.path.splitext(filename)
+        filename = f"{name}_{int(time.time())}{ex}"
         file_key = f"{folder}/{filename}"
-        
-        try:
-            s3_client.head_object(Bucket=BUCKET_NAME, Key=file_key)
-            name, ex = os.path.splitext(filename)
-            filename = f"{name}_{int(time.time())}{ex}"
-            file_key = f"{folder}/{filename}"
-        except ClientError:
-            pass
-        
+    except ClientError:
+        pass
+    
+    try:
         content_type, _ = mimetypes.guess_type(filename)
         s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key, ExtraArgs={'ContentType': content_type or 'application/octet-stream'})
+    except Exception as e:
+        with closing(get_db_connection()) as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
+            row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+            used = int(row["value"]) if row else file_size
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(max(0, used - file_size)),))
+            conn.commit()
+        raise e
         
     log_action(current_user["username"], "Импорт файла", f"Файл: {filename} в {folder}")
     log_storage_action(file_key, "ЗАГРУЗКА", file_size, current_user["username"])
     return {"success": True, "message": f"Файл {filename} импортирован в {folder}"}
 
-# ==========================================
-# НОВАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ФОНОВОЙ ЗАГЛУШКИ
-# ==========================================
 @app.post("/settings/fallback/upload")
 async def upload_fallback(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
@@ -593,22 +620,37 @@ async def upload_fallback(file: UploadFile = File(...), current_user: dict = Dep
     file_size = file.file.tell()
     file.file.seek(0)
     
-    with upload_lock:
-        if get_total_bucket_size() + file_size > MAX_STORAGE_BYTES:
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE;")
+        row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+        current_used = int(row["value"]) if row else 0
+        
+        if current_used + file_size > MAX_STORAGE_BYTES:
+            conn.rollback()
             raise HTTPException(status_code=400, detail="Превышен лимит хранилища в 100 ГБ")
         
-        # Сохраняем в системную папку (скрытую от медиатеки)
-        folder = "system"
-        name, ex = os.path.splitext(filename)
-        new_filename = f"fallback_{int(time.time())}{ex}"
-        file_key = f"{folder}/{new_filename}"
-        
-        try:
-            content_type, _ = mimetypes.guess_type(filename)
-            s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key, ExtraArgs={'ContentType': content_type or 'application/octet-stream'})
-        except ClientError as e:
-            logger.error(f"S3 fallback upload error: {e}")
-            raise HTTPException(status_code=500, detail="Ошибка загрузки в хранилище S3")
+        new_used = current_used + file_size
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
+        conn.commit()
+    
+    folder = "system"
+    name, ex = os.path.splitext(filename)
+    new_filename = f"fallback_{int(time.time())}{ex}"
+    file_key = f"{folder}/{new_filename}"
+    
+    try:
+        content_type, _ = mimetypes.guess_type(filename)
+        s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key, ExtraArgs={'ContentType': content_type or 'application/octet-stream'})
+    except Exception as e:
+        with closing(get_db_connection()) as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
+            row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+            used = int(row["value"]) if row else file_size
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(max(0, used - file_size)),))
+            conn.commit()
+        raise e
         
     with closing(get_db_connection()) as conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (file_key,))
@@ -634,7 +676,6 @@ def set_fallback(data: FallbackSettings, current_user: dict = Depends(get_curren
     log_action(current_user["username"], "Настройка системы", f"Установлена фоновая заглушка: {data.file}")
     return {"message": "Заглушка сохранена"}
 
-
 @app.get("/media-file/{file_key:path}")
 def get_media_file(file_key: str, request: Request):
     decoded_key = urllib.parse.unquote(file_key)
@@ -646,7 +687,6 @@ def get_media_file(file_key: str, request: Request):
         if not content_type:
             content_type = response.get('ContentType', 'application/octet-stream')
         
-        # Поддержка воспроизведения видео для iOS Safari (MP4)
         if decoded_key.lower().endswith('.mp4'):
             content_type = 'video/mp4'
 
@@ -656,7 +696,6 @@ def get_media_file(file_key: str, request: Request):
             "Access-Control-Allow-Origin": "*"
         }
         
-        # Отдача видео по кусочкам
         client_range = request.headers.get("range")
         if client_range:
             start_str, end_str = client_range.replace("bytes=", "").split("-")
@@ -684,7 +723,6 @@ def list_files(request: Request, current_user: dict = Depends(get_current_user))
     files_list = []
     
     for obj in response.get("Contents", []):
-        # Прячем от интерфейса файлы из Корзины и Системной папки (Заглушки)
         if not obj["Key"].startswith("trash/") and not obj["Key"].startswith("system/"):
             parts = obj["Key"].split('/')
             encoded_key = "/".join(urllib.parse.quote(p) for p in parts)
@@ -714,7 +752,14 @@ def delete_file(file_key: str, current_user: dict = Depends(get_current_user)):
         s3_client.delete_object(Bucket=BUCKET_NAME, Key=decoded_key)
         
         with closing(get_db_connection()) as conn:
-            conn.execute('INSERT INTO trash (name, size, data, deleted_at) VALUES (?, ?, ?, ?)',
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
+            row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+            current_used = int(row["value"]) if row else file_size
+            new_used = max(0, current_used - file_size)
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
+            
+            cursor.execute('INSERT INTO trash (name, size, data, deleted_at) VALUES (?, ?, ?, ?)',
                          (decoded_key, file_size, trash_key, datetime.now().isoformat()))
             conn.commit()
         
@@ -745,20 +790,33 @@ def restore_file(file_name: str, current_user: dict = Depends(get_current_user))
         if not target_item:
             raise HTTPException(status_code=404, detail="Файл не найден в корзине БД")
             
+        trash_key = target_item["data"]
+        file_size = target_item["size"]
+        
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE;")
+        row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+        current_used = int(row["value"]) if row else 0
+        
+        if current_used + file_size > MAX_STORAGE_BYTES:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail="Превышен лимит хранилища в 100 ГБ при восстановлении")
+        
+        new_used = current_used + file_size
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
+        
         try:
-            trash_key = target_item["data"]
-            file_size = target_item["size"]
-            
             s3_client.copy_object(Bucket=BUCKET_NAME, CopySource={'Bucket': BUCKET_NAME, 'Key': trash_key}, Key=decoded_name)
             s3_client.delete_object(Bucket=BUCKET_NAME, Key=trash_key)
             
-            conn.execute('DELETE FROM trash WHERE name = ?', (decoded_name,))
+            cursor.execute('DELETE FROM trash WHERE name = ?', (decoded_name,))
             conn.commit()
             
             log_action(current_user["username"], "Восстановление", f"Файл: {decoded_name}")
             log_storage_action(decoded_name, "ВОССТАНОВЛЕНИЕ", file_size, current_user["username"])
             return {"message": "Успешно восстановлено"}
         except ClientError as e:
+            conn.rollback()
             logger.error(f"S3 Error on restore: {e}")
             raise HTTPException(status_code=500, detail="Ошибка при восстановлении файла из S3")
 
@@ -794,10 +852,7 @@ def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depend
             s = dict(row)
             s["screens"] = json.loads(s["screens"]) if s["screens"] else []
             s["status"] = get_dynamic_status(s.get("time_start"), s.get("time_end"), s.get("city", "global"))
-            
-            # НОВОЕ: Добавляем крипто-подпись к каждому расписанию
             s["qr_hash"] = generate_qr_hash(s["id"]) 
-            
             schedules.append(s)
             
     if current_user["role"] != "admin":
