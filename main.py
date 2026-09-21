@@ -178,6 +178,8 @@ def clean_old_records_sqlite():
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
         now = datetime.now()
+        
+        # 1. Возвращаем 365 дней (храним трансляции в базе для Архива 1 год)
         cursor.execute('SELECT id, time_end FROM schedules')
         for row in cursor.fetchall():
             try:
@@ -185,6 +187,8 @@ def clean_old_records_sqlite():
                     cursor.execute('DELETE FROM schedules WHERE id = ?', (row[0],))
             except ValueError:
                 pass
+                
+        # 2. Очистка корзины (удаляем файлы, лежащие дольше 30 дней)
         cursor.execute('SELECT id, deleted_at FROM trash')
         for row in cursor.fetchall():
             try:
@@ -192,6 +196,7 @@ def clean_old_records_sqlite():
                     cursor.execute('DELETE FROM trash WHERE id = ?', (row[0],))
             except ValueError:
                 pass
+                
         conn.commit()
 
 def get_dynamic_status(start_str, end_str, city):

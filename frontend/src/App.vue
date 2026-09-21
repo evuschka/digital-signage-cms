@@ -47,6 +47,36 @@ const { chartStatusRef, chartCityRef } = reports;
 const currentTab = ref(''); 
 
 // ==========================================
+// ЛОГИКА АРХИВА РАСПИСАНИЙ
+// ==========================================
+const showArchive = ref(false);
+
+// Функция проверяет, прошло ли 5 или более дней с момента завершения эфира
+const isScheduleArchived = (schedule) => {
+    if (schedule.status !== 'Завершен') return false;
+    try {
+        const endDate = new Date(schedule.time_end);
+        const now = new Date();
+        // Разница в миллисекундах переводится в дни
+        const diffDays = Math.floor((now - endDate) / (1000 * 60 * 60 * 24));
+        return diffDays >= 5;
+    } catch (e) {
+        return false;
+    }
+};
+
+// Динамический список: показывает либо Архив, либо Активное расписание
+const displaySchedules = computed(() => {
+    const list = schedules.schedules?.value || [];
+    if (showArchive.value) {
+        return list.filter(s => isScheduleArchived(s));
+    } else {
+        return list.filter(s => !isScheduleArchived(s));
+    }
+});
+// ==========================================
+
+// ==========================================
 // ЛОГИКА ДОСТУПА ПО QR-КОДУ (РЕЖИМ ЗРИТЕЛЯ)
 // ==========================================
 const urlParams = new URLSearchParams(window.location.search);
@@ -88,8 +118,6 @@ const nextMobileItem = () => {
     playMobileItem();
 };
 
-// Генерация QR-кода для администраторов
-// Генерация QR-кода для администраторов
 // Генерация QR-кода для администраторов
 const showQrModal = ref(false);
 const currentQrUrl = ref('');
@@ -966,9 +994,18 @@ const activeMonitorSchedule = computed(() => {
 
                     <!-- Вкладка: РАСПИСАНИЯ -->
                     <div v-if="currentTab === 'schedule'" class="space-y-6">
+                        
+                        <!-- НОВАЯ ШАПКА С КНОПКОЙ АРХИВА -->
                         <div class="flex justify-between items-center">
-                            <h2 class="text-xl font-semibold text-emerald-900">График трансляций (Smart Planner)</h2>
-                            <button v-if="auth.login.value === 'admin_main'" @click="schedules.openScheduleModal" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
+                            <h2 class="text-xl font-semibold text-emerald-900">
+                                {{ showArchive ? '🗄 Архив трансляций (старше 5 дней)' : 'График трансляций (Smart Planner)' }}
+                            </h2>
+                            <div class="flex gap-3">
+                                <button @click="showArchive = !showArchive" class="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 px-4 py-2 rounded-lg text-sm shadow-sm transition cursor-pointer border-0 font-medium">
+                                    {{ showArchive ? '← К активному графику' : '🗄 Архив' }}
+                                </button>
+                                <button v-if="auth.login.value === 'admin_main' && !showArchive" @click="schedules.openScheduleModal" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
+                            </div>
                         </div>
 
                         <div v-if="schedules.showAddModal.value" class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-md">
@@ -1047,7 +1084,7 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                         
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm overflow-x-auto">
-                            <table v-if="schedules.schedules.value.length > 0" class="w-full text-sm text-left text-emerald-900">
+                            <table v-if="displaySchedules.length > 0" class="w-full text-sm text-left text-emerald-900">
                                 <thead class="text-xs text-emerald-800 uppercase bg-emerald-100/70 border-b border-emerald-200">
                                     <tr>
                                         <th class="px-6 py-3">Контент</th>
@@ -1058,18 +1095,18 @@ const activeMonitorSchedule = computed(() => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr v-for="item in schedules.schedules.value" :key="item.id" class="border-b border-emerald-200 hover:bg-emerald-100/40 transition">
-                                        <td class="px-6 py-4 font-medium">
+                                    <tr v-for="item in displaySchedules" :key="item.id" class="border-b border-emerald-200 hover:bg-emerald-100/40 transition">
+                                        <td class="px-6 py-4 font-medium" :class="showArchive ? 'opacity-70' : ''">
                                             <span v-if="item.playlist_id" class="text-emerald-700 font-bold flex items-center gap-1">
                                                 📑 Плейлист: {{ getPlaylistName(item.playlist_id) }}
                                             </span>
                                             <span v-else>📁 {{ item.file }}</span>
                                         </td>
-                                        <td class="px-6 py-4 text-xs">
+                                        <td class="px-6 py-4 text-xs" :class="showArchive ? 'opacity-70' : ''">
                                             <span class="font-bold text-emerald-800 uppercase">{{ item.city }}</span><br>
                                             <span class="text-[10px] text-slate-500 font-normal lowercase">{{ !item.screens || item.screens.length === 0 ? 'Все экраны' : item.screens.join(', ') }}</span>
                                         </td>
-                                        <td class="px-6 py-4 text-[11px] leading-tight">
+                                        <td class="px-6 py-4 text-[11px] leading-tight" :class="showArchive ? 'opacity-70' : ''">
                                             <div class="flex flex-col gap-0.5">
                                                 <span>С: {{ item.time_start.replace('T', ' ') }}</span>
                                                 <span>По: {{ item.time_end.replace('T', ' ') }}</span>
@@ -1092,7 +1129,9 @@ const activeMonitorSchedule = computed(() => {
                                     </tr>
                                 </tbody>
                             </table>
-                            <div v-else class="text-center py-8 text-emerald-600 bg-white rounded-lg border border-dashed border-emerald-200">Расписание пока пусто.</div>
+                            <div v-else class="text-center py-8 text-emerald-600 bg-white rounded-lg border border-dashed border-emerald-200">
+                                {{ showArchive ? 'В архиве пока нет старых трансляций.' : 'Расписание пока пусто.' }}
+                            </div>
                         </div>
                     </div>
 
