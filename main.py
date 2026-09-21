@@ -345,22 +345,6 @@ def change_password(data: PasswordChange, current_user: dict = Depends(get_curre
 # МАРШРУТЫ ПРИЛОЖЕНИЯ
 # ==========================================
 
-@app.get("/settings/fallback")
-def get_fallback():
-    with closing(get_db_connection()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
-        return {"file": row["value"] if row else ""}
-
-@app.post("/settings/fallback")
-def set_fallback(data: FallbackSettings, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    with closing(get_db_connection()) as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (data.file,))
-        conn.commit()
-    log_action(current_user["username"], "Настройка системы", f"Установлена фоновая заглушка: {data.file}")
-    return {"message": "Заглушка сохранена"}
-
 @app.get("/server-ip/")
 def get_server_ip(current_user: dict = Depends(get_current_user)):
     try:
@@ -576,6 +560,65 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
     log_storage_action(file_key, "ЗАГРУЗКА", file_size, current_user["username"])
     return {"success": True, "message": f"Файл {filename} импортирован в {folder}"}
 
+# ==========================================
+# НОВАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ФОНОВОЙ ЗАГЛУШКИ
+# ==========================================
+@app.post("/settings/fallback/upload")
+async def upload_fallback(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403)
+    
+    filename = os.path.basename(file.filename or "")
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Формат '.{ext}' не поддерживается.")
+    
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    
+    with upload_lock:
+        if get_total_bucket_size() + file_size > MAX_STORAGE_BYTES:
+            raise HTTPException(status_code=400, detail="Превышен лимит хранилища в 100 ГБ")
+        
+        # Сохраняем в системную папку (скрытую от медиатеки)
+        folder = "system"
+        name, ex = os.path.splitext(filename)
+        new_filename = f"fallback_{int(time.time())}{ex}"
+        file_key = f"{folder}/{new_filename}"
+        
+        try:
+            content_type, _ = mimetypes.guess_type(filename)
+            s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key, ExtraArgs={'ContentType': content_type or 'application/octet-stream'})
+        except ClientError as e:
+            logger.error(f"S3 fallback upload error: {e}")
+            raise HTTPException(status_code=500, detail="Ошибка загрузки в хранилище S3")
+        
+    with closing(get_db_connection()) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (file_key,))
+        conn.commit()
+        
+    log_action(current_user["username"], "Настройка системы", f"Загружена новая фоновая заглушка: {filename}")
+    log_storage_action(file_key, "ЗАГРУЗКА ЗАГЛУШКИ", file_size, current_user["username"])
+    return {"message": "Заглушка сохранена", "file": file_key}
+
+@app.get("/settings/fallback")
+def get_fallback():
+    with closing(get_db_connection()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
+        return {"file": row["value"] if row else ""}
+
+@app.post("/settings/fallback")
+def set_fallback(data: FallbackSettings, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403)
+    with closing(get_db_connection()) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (data.file,))
+        conn.commit()
+    log_action(current_user["username"], "Настройка системы", f"Установлена фоновая заглушка: {data.file}")
+    return {"message": "Заглушка сохранена"}
+
+
 @app.get("/media-file/{file_key:path}")
 def get_media_file(file_key: str, request: Request):
     decoded_key = urllib.parse.unquote(file_key)
@@ -625,7 +668,8 @@ def list_files(request: Request, current_user: dict = Depends(get_current_user))
     files_list = []
     
     for obj in response.get("Contents", []):
-        if not obj["Key"].startswith("trash/"):
+        # Прячем от интерфейса файлы из Корзины и Системной папки (Заглушки)
+        if not obj["Key"].startswith("trash/") and not obj["Key"].startswith("system/"):
             parts = obj["Key"].split('/')
             encoded_key = "/".join(urllib.parse.quote(p) for p in parts)
             files_list.append({

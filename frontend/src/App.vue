@@ -73,9 +73,12 @@ const displaySchedules = computed(() => {
 });
 
 // ==========================================
-// ЛОГИКА ФОНОВОЙ ЗАГЛУШКИ (FALLBACK)
+// ЛОГИКА ФОНОВОЙ ЗАГЛУШКИ (ИЗОЛИРОВАННАЯ ЗАГРУЗКА)
 // ==========================================
 const fallbackFile = ref('');
+const fallbackFileInput = ref(null);
+const isFallbackUploading = ref(false);
+const fallbackUploadProgress = ref(0);
 
 const fetchFallback = async () => {
     try {
@@ -85,16 +88,64 @@ const fetchFallback = async () => {
     } catch (e) {}
 };
 
-const saveFallback = async () => {
+const uploadFallback = () => {
+    const input = fallbackFileInput.value;
+    if (!input || !input.files || input.files.length === 0) {
+        showToast('Выберите файл для загрузки', 'warning');
+        return;
+    }
+    
+    const file = input.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    isFallbackUploading.value = true;
+    fallbackUploadProgress.value = 0;
+    
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/settings/fallback/upload', true);
+    xhr.setRequestHeader('Authorization', auth.authHeader.value);
+    
+    xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+            fallbackUploadProgress.value = Math.round((e.loaded / e.total) * 100);
+        }
+    };
+    
+    xhr.onload = () => {
+        isFallbackUploading.value = false;
+        if (xhr.status === 200) {
+            const res = JSON.parse(xhr.responseText);
+            fallbackFile.value = res.file;
+            showToast('Заглушка успешно загружена и применена', 'success');
+            input.value = ''; 
+            media.fetchStats(); 
+        } else {
+            showToast('Ошибка загрузки', 'error');
+        }
+    };
+    
+    xhr.onerror = () => {
+        isFallbackUploading.value = false;
+        showToast('Сетевая ошибка при загрузке', 'error');
+    };
+    
+    xhr.send(formData);
+};
+
+const clearFallback = async () => {
     try {
         const res = await fetch('/settings/fallback', {
             method: 'POST',
             headers: { 'Authorization': auth.authHeader.value, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ file: fallbackFile.value })
+            body: JSON.stringify({ file: '' })
         });
-        if (res.ok) showToast('Фоновое видео успешно установлено', 'success');
+        if (res.ok) {
+            fallbackFile.value = '';
+            showToast('Заглушка очищена. Теперь будет черный экран.', 'info');
+        }
     } catch (e) {
-        showToast('Ошибка сохранения', 'error');
+        showToast('Ошибка', 'error');
     }
 };
 
@@ -189,7 +240,7 @@ const loadAllData = async () => {
     playlists.fetchPlaylists(); 
     schedules.fetchScreens(); 
     schedules.fetchSchedules();
-    fetchFallback(); // <-- Подгружаем заглушку
+    fetchFallback();
     if (auth.login.value === 'admin_main') media.fetchTrash();
 };
 
@@ -393,7 +444,7 @@ const handleMonitorCityChange = () => {
     monitorSelectedScreen.value = screens.length > 0 ? screens[0] : '';
 };
 
-// ИЗМЕНЕНИЕ: Встроенная логика Фоновой заглушки
+// Встроенная логика Фоновой заглушки
 const activeMonitorSchedule = computed(() => {
     if (!monitorSelectedCity.value || !monitorSelectedScreen.value) return null;
     const list = schedules.schedules?.value || [];
@@ -408,7 +459,6 @@ const activeMonitorSchedule = computed(() => {
     
     if (active) return active;
     
-    // Если эфира нет, подставляем фоновую заглушку в плеер!
     if (fallbackFile.value) {
         return { id: 'ЗАГЛУШКА', file: fallbackFile.value, is_fallback: true };
     }
@@ -441,7 +491,6 @@ const activeMonitorSchedule = computed(() => {
                  :src="getFileUrl(mobileData.items[mobileIndex].file)" 
                  class="w-full h-full object-contain">
                  
-            <!-- Анимированная подсказка для зрителя -->
             <div v-if="isVideo(mobileData.items[mobileIndex].file) && isMuted" 
                  class="absolute bottom-16 bg-white/20 backdrop-blur-md px-5 py-3 rounded-full text-white text-xs font-bold tracking-wide border border-white/30 animate-bounce shadow-lg">
                 👆 Коснитесь экрана, чтобы включить звук
@@ -1038,14 +1087,21 @@ const activeMonitorSchedule = computed(() => {
                         <div v-if="auth.login.value === 'admin_main' && !showArchive" class="bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
                             <div>
                                 <h3 class="font-bold text-white text-base flex items-center gap-2">📺 Фоновое вещание (Заглушка)</h3>
-                                <p class="text-xs text-slate-300 mt-1">Этот файл непрерывно крутится на экранах сети в любое свободное время.</p>
+                                <p class="text-xs text-slate-300 mt-1">Отдельный файл, который играет, когда нет активных трансляций.</p>
+                                <p v-if="fallbackFile" class="text-[11px] text-emerald-400 mt-2 font-mono bg-black/30 px-2 py-1 rounded inline-block">Текущая: {{ fallbackFile.split('/').pop() }}</p>
+                                <p v-else class="text-[11px] text-amber-400 mt-2 font-mono bg-black/30 px-2 py-1 rounded inline-block">Заглушка не установлена</p>
                             </div>
-                            <div class="flex items-center gap-3 w-full md:w-auto">
-                                <select v-model="fallbackFile" class="flex-1 md:w-64 bg-slate-700 text-white border border-slate-600 rounded p-2 text-sm focus:outline-none focus:border-emerald-500">
-                                    <option value="">-- Без заглушки (черный экран) --</option>
-                                    <option v-for="f in media.files.value" :key="f.name" :value="f.name">🎬 {{ f.name }}</option>
-                                </select>
-                                <button @click="saveFallback" class="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded text-sm cursor-pointer border-0 shadow-sm transition whitespace-nowrap font-medium">Применить</button>
+                            <div class="flex flex-col gap-2 w-full md:w-auto">
+                                <div class="flex items-center gap-3">
+                                    <input type="file" ref="fallbackFileInput" accept="video/mp4,video/webm,image/jpeg,image/png" class="block w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-slate-600 file:text-white hover:file:bg-slate-500 cursor-pointer bg-slate-900 rounded border border-slate-600">
+                                    <button @click="uploadFallback" :disabled="isFallbackUploading" class="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-800 disabled:text-emerald-300 text-white px-5 py-2 rounded text-sm cursor-pointer border-0 shadow-sm transition font-medium whitespace-nowrap">
+                                        {{ isFallbackUploading ? 'Загрузка...' : 'Загрузить' }}
+                                    </button>
+                                    <button v-if="fallbackFile" @click="clearFallback" class="bg-red-500/20 hover:bg-red-500/40 text-red-400 px-3 py-2 rounded text-sm cursor-pointer border border-red-500/30 transition">✕</button>
+                                </div>
+                                <div v-if="isFallbackUploading" class="w-full bg-slate-700 rounded-full h-1 mt-1">
+                                    <div class="bg-emerald-500 h-1 rounded-full transition-all duration-300" :style="{ width: fallbackUploadProgress + '%' }"></div>
+                                </div>
                             </div>
                         </div>
 
