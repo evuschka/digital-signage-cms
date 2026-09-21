@@ -68,42 +68,9 @@ ALLOWED_EXTENSIONS = {'mp4', 'mov', 'mkv', 'webm', 'avi', 'jpeg', 'jpg', 'png', 
 
 upload_lock = threading.Lock()
 
-def get_password_hash(password: str) -> str:
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
-    except ValueError:
-        return False
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_FILE, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA journal_mode=WAL;')
-    conn.execute('PRAGMA synchronous=NORMAL;')
-    return conn
-
-DEFAULT_USERS = {
-    "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
-    "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"}
-}
-
-SCREENS_DB = {
-    "moscow": ["Москва-Экран-1", "Москва-Экран-2", "Москва-Экран-3"],
-    "spb": ["СПБ-Экран-1", "СПБ-Экран-2"],
-    "novocheboksarsk": ["Новочебоксарск-Экран-1"],
-    "yartsevo": ["Ярцево-Экран-1"],
-    "azov": ["Азов-Экран-1"],
-    "orenburg": ["Оренбург-Экран-1"],
-    "chernyakhovsk": ["Черняховск-Экран-1"]
-}
-
-CITY_TZ_OFFSETS = {
-    "global": 3, "moscow": 3, "spb": 3, "novocheboksarsk": 3,
-    "yartsevo": 3, "azov": 3, "orenburg": 5, "chernyakhovsk": 2
-}
-
+# ==========================================
+# МОДЕЛИ ДАННЫХ (PYDANTIC)
+# ==========================================
 class PasswordChange(BaseModel):
     old_password: str = Field(..., max_length=100)
     new_password: str = Field(..., max_length=100)
@@ -139,6 +106,48 @@ class ScheduleCreate(BaseModel):
     time_start: str
     time_end: str
 
+class FallbackSettings(BaseModel):
+    file: str
+
+# ==========================================
+# КОНСТАНТЫ И БАЗА ДАННЫХ
+# ==========================================
+DEFAULT_USERS = {
+    "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
+    "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"}
+}
+
+SCREENS_DB = {
+    "moscow": ["Москва-Экран-1", "Москва-Экран-2", "Москва-Экран-3"],
+    "spb": ["СПБ-Экран-1", "СПБ-Экран-2"],
+    "novocheboksarsk": ["Новочебоксарск-Экран-1"],
+    "yartsevo": ["Ярцево-Экран-1"],
+    "azov": ["Азов-Экран-1"],
+    "orenburg": ["Оренбург-Экран-1"],
+    "chernyakhovsk": ["Черняховск-Экран-1"]
+}
+
+CITY_TZ_OFFSETS = {
+    "global": 3, "moscow": 3, "spb": 3, "novocheboksarsk": 3,
+    "yartsevo": 3, "azov": 3, "orenburg": 5, "chernyakhovsk": 2
+}
+
+def get_password_hash(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    except ValueError:
+        return False
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL;')
+    conn.execute('PRAGMA synchronous=NORMAL;')
+    return conn
+
 def init_db():
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
@@ -149,7 +158,8 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS requests (username TEXT PRIMARY KEY, time TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, action TEXT NOT NULL, details TEXT, timestamp TEXT NOT NULL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS storage_history (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT NOT NULL, operation TEXT NOT NULL, size INTEGER, username TEXT NOT NULL, timestamp TEXT NOT NULL)''')
-        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_schedules_time ON schedules (time_start, time_end);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_playlists_city ON playlists (city);')
         
@@ -215,6 +225,17 @@ def get_dynamic_status(start_str, end_str, city):
     except ValueError:
         return "Ошибка даты"
 
+def get_total_bucket_size():
+    try:
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
+        return sum(obj['Size'] for obj in response.get('Contents', []))
+    except ClientError as e:
+        logger.error(f"S3 connection error: {e}")
+        return 0
+
+# ==========================================
+# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ
+# ==========================================
 def get_current_user(request: Request):
     auth = request.headers.get("Authorization")
     if not auth or not auth.startswith("Basic "):
@@ -320,6 +341,37 @@ def change_password(data: PasswordChange, current_user: dict = Depends(get_curre
     log_action(current_user["username"], "Смена пароля", "Пользователь сменил пароль")
     return {"message": "Пароль успешно изменен"}
 
+# ==========================================
+# МАРШРУТЫ ПРИЛОЖЕНИЯ
+# ==========================================
+
+@app.get("/settings/fallback")
+def get_fallback():
+    with closing(get_db_connection()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
+        return {"file": row["value"] if row else ""}
+
+@app.post("/settings/fallback")
+def set_fallback(data: FallbackSettings, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403)
+    with closing(get_db_connection()) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (data.file,))
+        conn.commit()
+    log_action(current_user["username"], "Настройка системы", f"Установлена фоновая заглушка: {data.file}")
+    return {"message": "Заглушка сохранена"}
+
+@app.get("/server-ip/")
+def get_server_ip(current_user: dict = Depends(get_current_user)):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return {"ip": ip}
+    except Exception:
+        return {"ip": "127.0.0.1"}
+
 @app.get("/history/")
 def get_history(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
@@ -336,21 +388,12 @@ def get_storage_history(current_user: dict = Depends(get_current_user)):
         history = [dict(row) for row in conn.execute('SELECT * FROM storage_history ORDER BY timestamp DESC LIMIT 200').fetchall()]
     return {"storage_history": history}
 
-def get_total_bucket_size():
-    try:
-        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
-        return sum(obj['Size'] for obj in response.get('Contents', []))
-    except ClientError as e:
-        logger.error(f"S3 connection error: {e}")
-        return 0
-
 @app.get("/storage-stats/")
 def get_storage_stats(current_user: dict = Depends(get_current_user)):
     size = get_total_bucket_size()
     percent = (size / MAX_STORAGE_BYTES) * 100
     return {"used": size, "max": MAX_STORAGE_BYTES, "percent": round(percent, 2)}
 
-# БЛОКИРОВКА МОНИТОРИНГА ТОЛЬКО ДЛЯ АДМИНОВ
 @app.get("/monitoring/")
 def get_monitoring(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
@@ -368,21 +411,8 @@ def get_monitoring(current_user: dict = Depends(get_current_user)):
             })
     return {"monitoring": status_list}
 
-@app.get("/server-ip/")
-def get_server_ip(current_user: dict = Depends(get_current_user)):
-    try:
-        # Устанавливаем фиктивное соединение, чтобы узнать наш IP в локальной сети
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return {"ip": ip}
-    except Exception:
-        return {"ip": "127.0.0.1"}
-
 @app.get("/public-broadcast/{schedule_id}")
 def get_public_broadcast(schedule_id: int, hash: str):
-    # 1. Проверка доступа: сверяем подпись
     expected_string = f"signage_{schedule_id}_secure".encode('utf-8')
     expected_hash = base64.b64encode(expected_string).decode('utf-8')
     
@@ -395,16 +425,17 @@ def get_public_broadcast(schedule_id: int, hash: str):
             raise HTTPException(status_code=404, detail="Трансляция не найдена")
         
         s_dict = dict(s)
-        
-        # ИСПРАВЛЕНИЕ: Вычисляем статус динамически, так как его нет в таблице БД
         city = s_dict.get("city", "global")
         current_status = get_dynamic_status(s_dict["time_start"], s_dict["time_end"], city)
         
-        # Если эфир кончился или еще не начался - не пускаем
         if current_status != "Активен":
-            raise HTTPException(status_code=403, detail="Трансляция в данный момент неактивна")
+            with closing(get_db_connection()) as conn2:
+                row = conn2.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
+                if row and row["value"]:
+                    return {"schedule_id": "FALLBACK", "items": [{"file": row["value"], "duration": 10}], "is_fallback": True}
+                else:
+                    raise HTTPException(status_code=403, detail="Трансляция неактивна, а фоновое видео не задано")
             
-        # Формируем плейлист для телефона
         items = []
         if s_dict["playlist_id"]:
             pl = conn.execute('SELECT items FROM playlists WHERE id = ?', (s_dict["playlist_id"],)).fetchone()
@@ -441,7 +472,6 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
         except Exception:
             pass
             
-    # Считаем только те показы, которые еще не завершились
     planned_shows = status_counts["Ожидание"] + status_counts["Активен"]
             
     return {
@@ -487,12 +517,10 @@ def update_playlist(playlist_id: int, item: PlaylistCreate, current_user: dict =
     items_json = json.dumps([i.model_dump() for i in item.items], ensure_ascii=False)
     
     with closing(get_db_connection()) as conn:
-        # Проверяем, существует ли плейлист
         row = conn.execute('SELECT * FROM playlists WHERE id = ?', (playlist_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Плейлист не найден")
             
-        # Обновляем данные
         conn.execute('''UPDATE playlists SET name = ?, city = ?, items = ?, "interval" = ?, repeats = ? WHERE id = ?''',
                      (item.name, item.city, items_json, item.interval, item.repeats, playlist_id))
         conn.commit()
@@ -502,16 +530,13 @@ def update_playlist(playlist_id: int, item: PlaylistCreate, current_user: dict =
 
 @app.delete("/playlists/{playlist_id}")
 def delete_playlist(playlist_id: int, current_user: dict = Depends(get_current_user)):
-    # Удалять плейлисты может только администратор
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Доступ запрещен")
         
     with closing(get_db_connection()) as conn:
-        # Удаляем запись из базы данных по её ID
         conn.execute('DELETE FROM playlists WHERE id = ?', (playlist_id,))
         conn.commit()
         
-    # Записываем действие в журнал событий
     log_action(current_user["username"], "Удаление плейлиста", f"ID плейлиста: {playlist_id}")
     return {"message": "Плейлист удален"}
 
@@ -555,40 +580,39 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
 def get_media_file(file_key: str, request: Request):
     decoded_key = urllib.parse.unquote(file_key)
     try:
-        # 1. Формируем запрос с учетом "кусочков" видео для телефона
-        s3_kwargs = {'Bucket': BUCKET_NAME, 'Key': decoded_key}
-        client_range = request.headers.get("range")
-        if client_range:
-            s3_kwargs['Range'] = client_range
-
-        response = s3_client.get_object(**s3_kwargs)
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=decoded_key)
+        file_data = response['Body'].read()
         
         content_type, _ = mimetypes.guess_type(decoded_key)
         if not content_type:
             content_type = response.get('ContentType', 'application/octet-stream')
-
-        headers = {"Accept-Ranges": "bytes"}
-        status_code = 200
         
-        if 'ContentRange' in response:
-            status_code = 206
-            headers['Content-Range'] = response['ContentRange']
-        if 'ContentLength' in response:
-            headers['Content-Length'] = str(response['ContentLength'])
+        # Поддержка воспроизведения видео для iOS Safari (MP4)
+        if decoded_key.lower().endswith('.mp4'):
+            content_type = 'video/mp4'
 
-        # ИСПРАВЛЕНИЕ: Безопасный генератор потока. Читаем бинарный файл правильными блоками!
-        def iterfile():
-            with closing(response['Body']) as body:
-                # Читаем файл кусками по 1 мегабайту
-                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
-                    yield chunk
-
-        return StreamingResponse(
-            iterfile(), 
-            status_code=status_code,
-            media_type=content_type,
-            headers=headers
-        )
+        file_size = len(file_data)
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*"
+        }
+        
+        # Отдача видео по кусочкам
+        client_range = request.headers.get("range")
+        if client_range:
+            start_str, end_str = client_range.replace("bytes=", "").split("-")
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+            
+            chunk = file_data[start:end+1]
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+            headers["Content-Length"] = str(len(chunk))
+            
+            return Response(content=chunk, status_code=206, media_type=content_type, headers=headers)
+        
+        headers["Content-Length"] = str(file_size)
+        return Response(content=file_data, status_code=200, media_type=content_type, headers=headers)
+        
     except ClientError as e:
         logger.error(f"S3 proxy error for {decoded_key}: {e}")
         raise HTTPException(status_code=404, detail="Файл не найден в хранилище")
@@ -742,6 +766,12 @@ def get_active_schedule(city: str = "moscow", screen: int = 0):
         elif s.get("file"):
             items.append({"file": s.get("file"), "duration": 10})
             
+    if not items:
+        with closing(get_db_connection()) as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
+            if row and row["value"]:
+                items.append({"file": row["value"], "duration": 10})
+                
     return {"items": items}
 
 @app.post("/schedules/")

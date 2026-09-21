@@ -51,13 +51,11 @@ const currentTab = ref('');
 // ==========================================
 const showArchive = ref(false);
 
-// Функция проверяет, прошло ли 5 или более дней с момента завершения эфира
 const isScheduleArchived = (schedule) => {
     if (schedule.status !== 'Завершен') return false;
     try {
         const endDate = new Date(schedule.time_end);
         const now = new Date();
-        // Разница в миллисекундах переводится в дни
         const diffDays = Math.floor((now - endDate) / (1000 * 60 * 60 * 24));
         return diffDays >= 5;
     } catch (e) {
@@ -65,7 +63,6 @@ const isScheduleArchived = (schedule) => {
     }
 };
 
-// Динамический список: показывает либо Архив, либо Активное расписание
 const displaySchedules = computed(() => {
     const list = schedules.schedules?.value || [];
     if (showArchive.value) {
@@ -74,7 +71,32 @@ const displaySchedules = computed(() => {
         return list.filter(s => !isScheduleArchived(s));
     }
 });
+
 // ==========================================
+// ЛОГИКА ФОНОВОЙ ЗАГЛУШКИ (FALLBACK)
+// ==========================================
+const fallbackFile = ref('');
+
+const fetchFallback = async () => {
+    try {
+        const res = await fetch('/settings/fallback');
+        const data = await safeJson(res);
+        if (data.file) fallbackFile.value = data.file;
+    } catch (e) {}
+};
+
+const saveFallback = async () => {
+    try {
+        const res = await fetch('/settings/fallback', {
+            method: 'POST',
+            headers: { 'Authorization': auth.authHeader.value, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file: fallbackFile.value })
+        });
+        if (res.ok) showToast('Фоновое видео успешно установлено', 'success');
+    } catch (e) {
+        showToast('Ошибка сохранения', 'error');
+    }
+};
 
 // ==========================================
 // ЛОГИКА ДОСТУПА ПО QR-КОДУ (РЕЖИМ ЗРИТЕЛЯ)
@@ -92,7 +114,7 @@ const isMuted = ref(true);
 
 const loadMobileViewer = async () => {
     try {
-        const res = await fetch(`/public-broadcast/${viewerId}?hash=${viewerHash}`);
+        const res = await fetch(`/public-broadcast/${viewerId}?hash=${encodeURIComponent(viewerHash)}`);
         if (!res.ok) {
             const err = await safeJson(res);
             mobileError.value = err.detail || 'Доступ запрещен';
@@ -118,7 +140,6 @@ const nextMobileItem = () => {
     playMobileItem();
 };
 
-// Генерация QR-кода для администраторов
 const showQrModal = ref(false);
 const currentQrUrl = ref('');
 
@@ -126,7 +147,6 @@ const openQr = async (schedule) => {
     const hash = btoa(`signage_${schedule.id}_secure`); 
     let host = window.location.hostname;
     
-    // Интеллектуальная подмена: если админ сидит с localhost, просим подтвердить IP
     if (host === 'localhost' || host === '127.0.0.1') {
         let guessedIp = host;
         try {
@@ -141,25 +161,21 @@ const openQr = async (schedule) => {
             console.error("Не удалось получить сетевой IP сервера", e);
         }
         
-        // Показываем диалоговое окно администратору для ручной корректировки
         const userIp = prompt("Подтвердите IP-адрес для зрителей (Wi-Fi):", guessedIp === '172.19.0.1' ? '172.20.10.4' : guessedIp);
         
         if (userIp) {
-            host = userIp.trim(); // Берем то, что ввел/подтвердил оператор
+            host = userIp.trim(); 
         } else {
-            return; // Если нажали "Отмена", прекращаем генерацию
+            return; 
         }
     }
     
-    // Собираем правильную ссылку с портом
     const port = window.location.port ? `:${window.location.port}` : '';
     const baseUrl = `${window.location.protocol}//${host}${port}`; 
     
     currentQrUrl.value = `${baseUrl}/?viewer_id=${schedule.id}&hash=${hash}`;
     showQrModal.value = true;
 };
-// ==========================================
-
 
 // Функция загрузки всех данных
 const loadAllData = async () => {
@@ -173,10 +189,11 @@ const loadAllData = async () => {
     playlists.fetchPlaylists(); 
     schedules.fetchScreens(); 
     schedules.fetchSchedules();
+    fetchFallback(); // <-- Подгружаем заглушку
     if (auth.login.value === 'admin_main') media.fetchTrash();
 };
 
-// Загрузка при старте (распределяем логику для мобильного и для компьютера)
+// Загрузка при старте
 let clockInterval = null;
 onMounted(async () => {
     if (isMobileViewer.value) {
@@ -234,7 +251,6 @@ const getFileUrl = (fileName) => {
     const list = media.files?.value || [];
     const fileObj = list.find(f => f.name === fileName);
     if (fileObj && fileObj.url) return fileObj.url;
-    // Фоллбэк для мобильного зрителя, у которого нет токенов
     const parts = fileName.split('/');
     return `/media-file/${parts.map(p => encodeURIComponent(p)).join('/')}`;
 };
@@ -377,10 +393,11 @@ const handleMonitorCityChange = () => {
     monitorSelectedScreen.value = screens.length > 0 ? screens[0] : '';
 };
 
+// ИЗМЕНЕНИЕ: Встроенная логика Фоновой заглушки
 const activeMonitorSchedule = computed(() => {
     if (!monitorSelectedCity.value || !monitorSelectedScreen.value) return null;
     const list = schedules.schedules?.value || [];
-    return list.find(s => {
+    const active = list.find(s => {
         if (s.status !== 'Активен') return false;
         if (s.city !== 'global' && s.city !== monitorSelectedCity.value) return false;
         if (s.screens && s.screens.length > 0) {
@@ -388,6 +405,15 @@ const activeMonitorSchedule = computed(() => {
         }
         return true;
     });
+    
+    if (active) return active;
+    
+    // Если эфира нет, подставляем фоновую заглушку в плеер!
+    if (fallbackFile.value) {
+        return { id: 'ЗАГЛУШКА', file: fallbackFile.value, is_fallback: true };
+    }
+    
+    return null;
 });
 </script>
 
@@ -995,7 +1021,7 @@ const activeMonitorSchedule = computed(() => {
                     <!-- Вкладка: РАСПИСАНИЯ -->
                     <div v-if="currentTab === 'schedule'" class="space-y-6">
                         
-                        <!-- НОВАЯ ШАПКА С КНОПКОЙ АРХИВА -->
+                        <!-- ШАПКА С КНОПКОЙ АРХИВА -->
                         <div class="flex justify-between items-center">
                             <h2 class="text-xl font-semibold text-emerald-900">
                                 {{ showArchive ? '🗄 Архив трансляций (старше 5 дней)' : 'График трансляций (Smart Planner)' }}
@@ -1005,6 +1031,21 @@ const activeMonitorSchedule = computed(() => {
                                     {{ showArchive ? '← К активному графику' : '🗄 Архив' }}
                                 </button>
                                 <button v-if="auth.login.value === 'admin_main' && !showArchive" @click="schedules.openScheduleModal" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
+                            </div>
+                        </div>
+
+                        <!-- ПАНЕЛЬ ЗАГЛУШКИ (Только для Админа) -->
+                        <div v-if="auth.login.value === 'admin_main' && !showArchive" class="bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
+                            <div>
+                                <h3 class="font-bold text-white text-base flex items-center gap-2">📺 Фоновое вещание (Заглушка)</h3>
+                                <p class="text-xs text-slate-300 mt-1">Этот файл непрерывно крутится на экранах сети в любое свободное время.</p>
+                            </div>
+                            <div class="flex items-center gap-3 w-full md:w-auto">
+                                <select v-model="fallbackFile" class="flex-1 md:w-64 bg-slate-700 text-white border border-slate-600 rounded p-2 text-sm focus:outline-none focus:border-emerald-500">
+                                    <option value="">-- Без заглушки (черный экран) --</option>
+                                    <option v-for="f in media.files.value" :key="f.name" :value="f.name">🎬 {{ f.name }}</option>
+                                </select>
+                                <button @click="saveFallback" class="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded text-sm cursor-pointer border-0 shadow-sm transition whitespace-nowrap font-medium">Применить</button>
                             </div>
                         </div>
 
@@ -1200,10 +1241,15 @@ const activeMonitorSchedule = computed(() => {
                                                 <video v-else-if="isVideo(activeMonitorSchedule.file)" :src="getFileUrl(activeMonitorSchedule.file)" autoplay loop muted class="w-full h-full object-contain bg-black"></video>
                                             </div>
                                         </div>
+                                        
                                         <div class="absolute top-4 left-4 bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-2">
-                                            <div class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
-                                            <span class="text-white text-xs font-semibold tracking-wider">LIVE эфир</span>
+                                            <div v-if="!activeMonitorSchedule.is_fallback" class="w-2 h-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,1)]"></div>
+                                            <div v-else class="w-2 h-2 rounded-full bg-slate-400"></div>
+                                            <span class="text-white text-xs font-semibold tracking-wider">
+                                                {{ activeMonitorSchedule.is_fallback ? 'ФОНОВОЕ ВИДЕО' : 'LIVE ЭФИР' }}
+                                            </span>
                                         </div>
+                                        
                                         <div class="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-4 pt-12 pointer-events-none">
                                             <p class="text-white font-bold text-lg drop-shadow-md">{{ monitorSelectedCity.toUpperCase() }} / {{ monitorSelectedScreen }}</p>
                                             <p class="text-emerald-300 text-xs drop-shadow-md mt-1">Трансляция ID: {{ activeMonitorSchedule.id }}</p>
