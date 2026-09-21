@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>DS Player</title>
+    <style>
+        body { margin: 0; background: black; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        video, img { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
+    </style>
+</head>
+<body>
+    <video id="vidPlayer" autoplay muted></video>
+    <img id="imgPlayer">
+
+    <script>
+        // === НАСТРОЙКИ ЭКРАНА ===
+        // Указываем IP-адрес твоего ноутбука, на котором запущен main.py
+        const SERVER_URL = "http://172.20.10.4:8000"; 
+        
+        // Указываем, за какой город и экран отвечает этот телевизор
+        const CITY = "moscow";                          
+        const SCREEN_ID = "Москва-Экран-1";             
+        // ========================
+
+        const vid = document.getElementById('vidPlayer');
+        const img = document.getElementById('imgPlayer');
+        let currentPlaylist = [];
+        let currentIndex = 0;
+
+        async function fetchSchedule() {
+            try {
+                // Телевизор запрашивает расписание с твоего ноутбука
+                const res = await fetch(`${SERVER_URL}/schedules/active?city=${CITY}&screen=${SCREEN_ID}`);
+                const data = await res.json();
+                
+                if (JSON.stringify(data.items) !== JSON.stringify(currentPlaylist)) {
+                    currentPlaylist = data.items || [];
+                    currentIndex = 0;
+                    playNext();
+                }
+            } catch (e) { 
+                console.error("Ошибка связи с сервером (ноутбуком)"); 
+            }
+            
+            setTimeout(fetchSchedule, 30000); 
+        }
+
+        function playNext() {
+            if (currentPlaylist.length === 0) {
+                vid.style.display = 'none'; 
+                img.style.display = 'none'; 
+                return;
+            }
+
+            const item = currentPlaylist[currentIndex];
+            const fileUrl = `${SERVER_URL}/media-file/${encodeURIComponent(item.file)}`;
+            const isVideo = item.file.match(/\.(mp4|mov|mkv|webm)$/i);
+
+            if (isVideo) {
+                img.style.display = 'none';
+                vid.style.display = 'block';
+                vid.src = fileUrl;
+                vid.onended = () => advance(); 
+            } else {
+                vid.style.display = 'none';
+                img.style.display = 'block';
+                img.src = fileUrl;
+                setTimeout(advance, (item.duration || 10) * 1000); 
+            }
+        }
+
+        function advance() {
+            currentIndex = (currentIndex + 1) % currentPlaylist.length;
+            playNext();
+        }
+
+        fetchSchedule(); 
+    </script>
+</body>
+</html>

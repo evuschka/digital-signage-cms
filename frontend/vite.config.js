@@ -4,7 +4,6 @@ import vue from '@vitejs/plugin-vue';
 export default defineConfig({
   plugins: [vue()],
   server: {
-    host: '127.0.0.1',
     host: '0.0.0.0',
     port: 3000,
     allowedHosts: true,
@@ -22,7 +21,13 @@ export default defineConfig({
       '/storage-history': 'http://127.0.0.1:8000',
       '/request-reset': 'http://127.0.0.1:8000',
       '/change-password': 'http://127.0.0.1:8000',
-      '/screens': 'http://127.0.0.1:8000'
+      '/screens': 'http://127.0.0.1:8000',
+      '/public-broadcast': 'http://127.0.0.1:8000',
+      '/log-login': 'http://127.0.0.1:8000',
+      '/log-logout': 'http://127.0.0.1:8000',
+      // ЭТА СТРОКА РАЗРЕШАЕТ СКАЧИВАТЬ КАРТИНКИ И ВИДЕО:
+      '/media-file': 'http://127.0.0.1:8000',
+      '/server-ip': 'http://127.0.0.1:8000'
     }
   }
 });

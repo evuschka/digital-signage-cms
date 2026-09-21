@@ -5,6 +5,10 @@ export function usePlaylists(authHeader, showToast, isImage, isVideo, safeJson, 
     const showPlaylistModal = ref(false); 
     const selectedFileToAdd = ref('');
     const newPlaylist = ref({ name: '', city: 'global', items: [], interval: 3, repeats: 1 });
+    
+    // НОВОЕ: Переменная, которая помнит, какой именно плейлист мы сейчас редактируем
+    const editingPlaylistId = ref(null); 
+    
     const showPreviewModal = ref(false); 
     const previewPlaylistName = ref(''); 
     const previewItems = ref([]);
@@ -15,9 +19,31 @@ export function usePlaylists(authHeader, showToast, isImage, isVideo, safeJson, 
     const fetchPlaylists = async () => {
         try {
             const res = await fetch('/playlists/', { headers: { 'Authorization': authHeader.value } });
+            if (!res.ok) return;
             const data = await safeJson(res); 
             playlists.value = data.playlists || [];
-        } catch (e) {}
+        } catch (e) { console.error("Сетевая ошибка:", e); }
+    };
+
+    // ФУНКЦИЯ: Открыть чистую форму для СОЗДАНИЯ
+    const openCreateModal = () => {
+        editingPlaylistId.value = null; // Сбрасываем ID
+        newPlaylist.value = { name: '', city: 'global', items: [], interval: 3, repeats: 1 };
+        showPlaylistModal.value = true;
+    };
+
+    // ФУНКЦИЯ: Открыть заполненную форму для РЕДАКТИРОВАНИЯ
+    const openEditModal = (pl) => {
+        editingPlaylistId.value = pl.id; // Запоминаем ID
+        newPlaylist.value = { 
+            name: pl.name, 
+            city: pl.city, 
+            interval: pl.interval, 
+            repeats: pl.repeats, 
+            // Делаем глубокую копию файлов, чтобы не испортить оригинал до нажатия "Сохранить"
+            items: JSON.parse(JSON.stringify(pl.items)) 
+        };
+        showPlaylistModal.value = true;
     };
 
     const addFileToPlaylist = () => { 
@@ -41,16 +67,23 @@ export function usePlaylists(authHeader, showToast, isImage, isVideo, safeJson, 
             return showToast('Укажите название и добавьте файлы!', 'warning');
         }
         try {
-            const res = await fetch('/playlists/', { 
-                method: 'POST', 
+            // Если editingPlaylistId не пустой - значит мы обновляем (PUT), иначе создаем (POST)
+            const isEditing = editingPlaylistId.value !== null;
+            const url = isEditing ? `/playlists/${editingPlaylistId.value}` : '/playlists/';
+            const method = isEditing ? 'PUT' : 'POST';
+
+            const res = await fetch(url, { 
+                method: method, 
                 headers: { 'Authorization': authHeader.value, 'Content-Type': 'application/json' }, 
                 body: JSON.stringify(newPlaylist.value) 
             });
+            
             if (res.ok) {
                 newPlaylist.value = { name: '', city: 'global', items: [], interval: 3, repeats: 1 };
+                editingPlaylistId.value = null;
                 showPlaylistModal.value = false; 
-                fetchPlaylists(); 
-                showToast('Плейлист сохранен!', 'success');
+                fetchPlaylists(); // Обновляем список
+                showToast(isEditing ? 'Плейлист успешно обновлен!' : 'Плейлист сохранен!', 'success');
             } else { 
                 const err = await safeJson(res); 
                 showToast(err.detail || 'Ошибка сохранения', 'error'); 
@@ -67,9 +100,7 @@ export function usePlaylists(authHeader, showToast, isImage, isVideo, safeJson, 
                 fetchPlaylists(); 
                 showToast('Плейлист удален', 'success'); 
             }
-        } catch (e) { 
-            showToast('Ошибка сети', 'error'); 
-        }
+        } catch (e) { showToast('Ошибка сети', 'error'); }
     };
 
     const getFileUrl = (name) => {
@@ -105,9 +136,9 @@ export function usePlaylists(authHeader, showToast, isImage, isVideo, safeJson, 
     };
 
     return { 
-        playlists, showPlaylistModal, selectedFileToAdd, newPlaylist, showPreviewModal, 
-        previewPlaylistName, previewItems, previewIndex, previewCurrentItem, 
-        fetchPlaylists, addFileToPlaylist, removePlaylistItem, movePlaylistItem, 
-        savePlaylist, deletePlaylist, startPreview, closePreview, getFileUrl 
+        playlists, showPlaylistModal, selectedFileToAdd, newPlaylist, editingPlaylistId,
+        showPreviewModal, previewPlaylistName, previewItems, previewIndex, previewCurrentItem, 
+        fetchPlaylists, openCreateModal, openEditModal, addFileToPlaylist, removePlaylistItem, 
+        movePlaylistItem, savePlaylist, deletePlaylist, startPreview, closePreview, getFileUrl 
     };
 }

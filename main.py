@@ -10,6 +10,7 @@ import threading
 import mimetypes
 import base64
 import urllib.parse
+import socket
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
@@ -18,7 +19,7 @@ from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, status, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, Response
 from typing import List, Optional
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -362,6 +363,53 @@ def get_monitoring(current_user: dict = Depends(get_current_user)):
             })
     return {"monitoring": status_list}
 
+@app.get("/server-ip/")
+def get_server_ip(current_user: dict = Depends(get_current_user)):
+    try:
+        # Устанавливаем фиктивное соединение, чтобы узнать наш IP в локальной сети
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return {"ip": ip}
+    except Exception:
+        return {"ip": "127.0.0.1"}
+
+@app.get("/public-broadcast/{schedule_id}")
+def get_public_broadcast(schedule_id: int, hash: str):
+    # 1. Проверка доступа: сверяем подпись
+    expected_string = f"signage_{schedule_id}_secure".encode('utf-8')
+    expected_hash = base64.b64encode(expected_string).decode('utf-8')
+    
+    if hash != expected_hash:
+        raise HTTPException(status_code=403, detail="Доступ запрещен. Неверный ключ.")
+        
+    with closing(get_db_connection()) as conn:
+        s = conn.execute('SELECT * FROM schedules WHERE id = ?', (schedule_id,)).fetchone()
+        if not s:
+            raise HTTPException(status_code=404, detail="Трансляция не найдена")
+        
+        s_dict = dict(s)
+        
+        # ИСПРАВЛЕНИЕ: Вычисляем статус динамически, так как его нет в таблице БД
+        city = s_dict.get("city", "global")
+        current_status = get_dynamic_status(s_dict["time_start"], s_dict["time_end"], city)
+        
+        # Если эфир кончился или еще не начался - не пускаем
+        if current_status != "Активен":
+            raise HTTPException(status_code=403, detail="Трансляция в данный момент неактивна")
+            
+        # Формируем плейлист для телефона
+        items = []
+        if s_dict["playlist_id"]:
+            pl = conn.execute('SELECT items FROM playlists WHERE id = ?', (s_dict["playlist_id"],)).fetchone()
+            if pl and pl["items"]:
+                items = json.loads(pl["items"])
+        else:
+            items = [{"file": s_dict["file"], "duration": 10}]
+            
+        return {"schedule_id": schedule_id, "items": items}
+
 @app.get("/analytics/")
 def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
@@ -374,6 +422,7 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
     total_hours = 0
     status_counts = {"Ожидание": 0, "Активен": 0, "Завершен": 0}
     city_counts = {}
+    
     for s in schedules:
         city = s.get("city", "global")
         st_status = get_dynamic_status(s.get("time_start"), s.get("time_end"), city)
@@ -387,18 +436,27 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
         except Exception:
             pass
             
-    return {"total_shows": len(schedules), "total_hours": round(total_hours, 1), "status_counts": status_counts, "city_counts": city_counts}
+    # Считаем только те показы, которые еще не завершились
+    planned_shows = status_counts["Ожидание"] + status_counts["Активен"]
+            
+    return {
+        "total_shows": planned_shows, 
+        "total_hours": round(total_hours, 1), 
+        "status_counts": status_counts, 
+        "city_counts": city_counts
+    }
 
 @app.get("/playlists/")
 def get_playlists(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Доступ запрещен")
     with closing(get_db_connection()) as conn:
         playlists = []
         for row in conn.execute('SELECT * FROM playlists').fetchall():
             p = dict(row)
             p["items"] = json.loads(p["items"]) if p["items"] else []
-            playlists.append(p)
+            
+            if current_user["role"] == "admin" or p["city"] == "global" or p["city"] == current_user["city_id"]:
+                playlists.append(p)
+                
     return {"playlists": playlists}
 
 @app.post("/playlists/")
@@ -416,13 +474,39 @@ def create_playlist(item: PlaylistCreate, current_user: dict = Depends(get_curre
     log_action(current_user["username"], "Создание плейлиста", f"Название: {item.name}, Город: {item.city}")
     return {"message": "Плейлист успешно создан", "id": p_id}
 
+@app.put("/playlists/{playlist_id}")
+def update_playlist(playlist_id: int, item: PlaylistCreate, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Только администратор может редактировать плейлисты")
+    
+    items_json = json.dumps([i.model_dump() for i in item.items], ensure_ascii=False)
+    
+    with closing(get_db_connection()) as conn:
+        # Проверяем, существует ли плейлист
+        row = conn.execute('SELECT * FROM playlists WHERE id = ?', (playlist_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Плейлист не найден")
+            
+        # Обновляем данные
+        conn.execute('''UPDATE playlists SET name = ?, city = ?, items = ?, "interval" = ?, repeats = ? WHERE id = ?''',
+                     (item.name, item.city, items_json, item.interval, item.repeats, playlist_id))
+        conn.commit()
+        
+    log_action(current_user["username"], "Редактирование плейлиста", f"Название: {item.name}")
+    return {"message": "Плейлист успешно обновлен"}
+
 @app.delete("/playlists/{playlist_id}")
 def delete_playlist(playlist_id: int, current_user: dict = Depends(get_current_user)):
+    # Удалять плейлисты может только администратор
     if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+        
     with closing(get_db_connection()) as conn:
+        # Удаляем запись из базы данных по её ID
         conn.execute('DELETE FROM playlists WHERE id = ?', (playlist_id,))
         conn.commit()
+        
+    # Записываем действие в журнал событий
     log_action(current_user["username"], "Удаление плейлиста", f"ID плейлиста: {playlist_id}")
     return {"message": "Плейлист удален"}
 
@@ -463,22 +547,40 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
     return {"success": True, "message": f"Файл {filename} импортирован в {folder}"}
 
 @app.get("/media-file/{file_key:path}")
-def get_media_file(file_key: str):
+def get_media_file(file_key: str, request: Request):
     decoded_key = urllib.parse.unquote(file_key)
     try:
-        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=decoded_key)
+        # 1. Формируем запрос с учетом "кусочков" видео для телефона
+        s3_kwargs = {'Bucket': BUCKET_NAME, 'Key': decoded_key}
+        client_range = request.headers.get("range")
+        if client_range:
+            s3_kwargs['Range'] = client_range
+
+        response = s3_client.get_object(**s3_kwargs)
+        
         content_type, _ = mimetypes.guess_type(decoded_key)
         if not content_type:
             content_type = response.get('ContentType', 'application/octet-stream')
 
-        safe_filename = urllib.parse.quote(os.path.basename(decoded_key))
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Disposition": f"inline; filename*=UTF-8''{safe_filename}"
-        }
+        headers = {"Accept-Ranges": "bytes"}
+        status_code = 200
+        
+        if 'ContentRange' in response:
+            status_code = 206
+            headers['Content-Range'] = response['ContentRange']
+        if 'ContentLength' in response:
+            headers['Content-Length'] = str(response['ContentLength'])
+
+        # ИСПРАВЛЕНИЕ: Безопасный генератор потока. Читаем бинарный файл правильными блоками!
+        def iterfile():
+            with closing(response['Body']) as body:
+                # Читаем файл кусками по 1 мегабайту
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    yield chunk
 
         return StreamingResponse(
-            response['Body'], 
+            iterfile(), 
+            status_code=status_code,
             media_type=content_type,
             headers=headers
         )
