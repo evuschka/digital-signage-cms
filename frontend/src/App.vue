@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, provide } from 'vue';
 import { useAuth } from './composables/useAuth.js';
 import { useHelpers } from './composables/useHelpers.js';
 import { useMedia } from './composables/useMedia.js';
@@ -7,6 +7,11 @@ import { usePlaylists } from './composables/usePlaylists.js';
 import { useSchedules } from './composables/useSchedules.js';
 import { useUsers } from './composables/useUsers.js';
 import { useReports } from './composables/useReports.js';
+
+// ИМПОРТ НОВЫХ КОМПОНЕНТОВ
+import MobilePlayer from './components/MobilePlayer.vue';
+import Sidebar from './components/Sidebar.vue';
+import MediaLibrary from './components/MediaLibrary.vue';
 
 // Вспомогательные функции
 const { isImage, isVideo, formatSize, formatDate, getRemainingDays } = useHelpers();
@@ -45,6 +50,25 @@ const reports = useReports(auth.authHeader, showToast, safeJson);
 
 const { chartStatusRef, chartCityRef } = reports;
 const currentTab = ref(''); 
+
+const getFileUrl = (fileName) => {
+    if (!fileName) return '';
+    const list = media.files?.value || [];
+    const fileObj = list.find(f => f.name === fileName);
+    if (fileObj && fileObj.url) return fileObj.url;
+    const parts = fileName.split('/');
+    return `/media-file/${parts.map(p => encodeURIComponent(p)).join('/')}`;
+};
+
+// ПРОВАЙДИНГ ДЛЯ МИКРО-КОМПОНЕНТОВ
+provide('auth', auth);
+provide('media', media);
+provide('users', users);
+provide('schedules', schedules);
+provide('playlists', playlists);
+provide('reports', reports);
+provide('getFileUrl', getFileUrl);
+provide('helpers', { isImage, isVideo, formatSize, formatDate, getRemainingDays });
 
 // ==========================================
 // ЛОГИКА АРХИВА РАСПИСАНИЙ
@@ -153,49 +177,13 @@ const clearFallback = async () => {
 // ЛОГИКА ДОСТУПА ПО QR-КОДУ (РЕЖИМ ЗРИТЕЛЯ)
 // ==========================================
 const urlParams = new URLSearchParams(window.location.search);
-const viewerId = urlParams.get('viewer_id');
-const viewerHash = urlParams.get('hash');
-const isMobileViewer = ref(!!viewerId);
-
-const mobileData = ref(null);
-const mobileError = ref('');
-const mobileIndex = ref(0);
-let mobileTimer = null;
-const isMuted = ref(true);
-
-const loadMobileViewer = async () => {
-    try {
-        const res = await fetch(`/public-broadcast/${viewerId}?hash=${encodeURIComponent(viewerHash)}`);
-        if (!res.ok) {
-            const err = await safeJson(res);
-            mobileError.value = err.detail || 'Доступ запрещен';
-            return;
-        }
-        mobileData.value = await safeJson(res);
-        playMobileItem();
-    } catch (e) {
-        mobileError.value = 'Ошибка подключения к эфиру';
-    }
-};
-
-const playMobileItem = () => {
-    if (!mobileData.value || !mobileData.value.items.length) return;
-    const item = mobileData.value.items[mobileIndex.value];
-    if (isImage(item.file)) {
-        mobileTimer = setTimeout(nextMobileItem, (item.duration || 10) * 1000);
-    }
-};
-
-const nextMobileItem = () => {
-    mobileIndex.value = (mobileIndex.value + 1) % mobileData.value.items.length;
-    playMobileItem();
-};
+const isMobileViewer = ref(!!urlParams.get('viewer_id'));
 
 const showQrModal = ref(false);
 const currentQrUrl = ref('');
 
 const openQr = async (schedule) => {
-    const hash = schedule.qr_hash; 
+    const hash = btoa(`signage_${schedule.id}_secure`); 
     let host = window.location.hostname;
     
     if (host === 'localhost' || host === '127.0.0.1') {
@@ -247,10 +235,7 @@ const loadAllData = async () => {
 // Загрузка при старте
 let clockInterval = null;
 onMounted(async () => {
-    if (isMobileViewer.value) {
-        await loadMobileViewer();
-        return; 
-    }
+    if (isMobileViewer.value) { return; }
     if (auth.isAuthenticated.value) {
         currentTab.value = auth.login.value === 'admin_main' ? 'media' : 'broadcasts';
         await loadAllData();
@@ -295,15 +280,6 @@ const getPlaylistName = (id) => {
     const list = playlists.playlists.value || [];
     const pl = list.find(p => String(p.id) === String(id));
     return pl ? pl.name : 'Неизвестный';
-};
-
-const getFileUrl = (fileName) => {
-    if (!fileName) return '';
-    const list = media.files?.value || [];
-    const fileObj = list.find(f => f.name === fileName);
-    if (fileObj && fileObj.url) return fileObj.url;
-    const parts = fileName.split('/');
-    return `/media-file/${parts.map(p => encodeURIComponent(p)).join('/')}`;
 };
 
 // ==========================================
@@ -470,38 +446,8 @@ const activeMonitorSchedule = computed(() => {
 <template>
 <div class="bg-white text-emerald-950 min-h-screen flex flex-col font-sans">
     
-    <!-- РЕЖИМ МОБИЛЬНОГО ЗРИТЕЛЯ (ОТКРЫТИЕ ПО QR-КОДУ) -->
-    <div v-if="isMobileViewer" class="h-screen w-screen bg-black flex flex-col items-center justify-center text-white fixed inset-0 z-[99999]">
-        <div v-if="mobileError" class="text-red-500 flex flex-col items-center gap-4 text-center px-6">
-            <span class="text-6xl">🔒</span>
-            <h2 class="text-xl font-bold">{{ mobileError }}</h2>
-            <p class="text-sm text-gray-400">Попробуйте отсканировать код заново.</p>
-        </div>
-        <div v-else-if="!mobileData" class="animate-pulse text-emerald-400 flex flex-col items-center gap-3">
-            <span class="text-4xl animate-spin">⏳</span>
-            Подключение к эфиру...
-        </div>
-        <div v-else class="w-full h-full relative flex items-center justify-center" @click="isMuted = false">
-            <video v-if="isVideo(mobileData.items[mobileIndex].file)" 
-                   :src="getFileUrl(mobileData.items[mobileIndex].file)" 
-                   autoplay :muted="isMuted" playsinline class="w-full h-full object-contain" 
-                   @ended="nextMobileItem"></video>
-                   
-            <img v-else 
-                 :src="getFileUrl(mobileData.items[mobileIndex].file)" 
-                 class="w-full h-full object-contain">
-                 
-            <div v-if="isVideo(mobileData.items[mobileIndex].file) && isMuted" 
-                 class="absolute bottom-16 bg-white/20 backdrop-blur-md px-5 py-3 rounded-full text-white text-xs font-bold tracking-wide border border-white/30 animate-bounce shadow-lg">
-                👆 Коснитесь экрана, чтобы включить звук
-            </div>
-                 
-            <div class="absolute top-4 left-4 bg-black/60 px-3 py-1 rounded-full text-[10px] uppercase font-bold flex items-center gap-2 tracking-widest backdrop-blur-md border border-white/10 pointer-events-none">
-                <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,1)]"></span>
-                Прямой эфир
-            </div>
-        </div>
-    </div>
+    <!-- ВЫНЕСЕННЫЙ МИКРО-КОМПОНЕНТ: МОБИЛЬНЫЙ ПЛЕЕР (ЗРИТЕЛЬ) -->
+    <MobilePlayer v-if="isMobileViewer" />
     
     <!-- СТАНДАРТНАЯ СИСТЕМА УПРАВЛЕНИЯ (СКРЫВАЕТСЯ ДЛЯ ЗРИТЕЛЕЙ) -->
     <template v-else>
@@ -580,55 +526,17 @@ const activeMonitorSchedule = computed(() => {
                     </div>
                 </div>
 
-                <!-- БОКОВОЕ МЕНЮ (САЙДБАР) -->
-                <aside class="w-64 bg-emerald-50 border-r border-emerald-200 flex flex-col hidden md:flex h-full relative z-20">
-                    <div class="p-4 border-b border-emerald-200 text-left">
-                        <svg class="h-6 w-auto max-w-full" viewBox="0 0 975 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M18.75 64C13.5 64 9.04167 62.4583 5.375 59.375C1.79167 56.2083 0 52.4167 0 48V16C0 11.5833 1.79167 7.83333 5.375 4.75C9.04167 1.58333 13.5 0 18.75 0H75V16H28.125C25.5417 16 23.2917 16.7917 21.375 18.375C19.625 19.9583 18.75 21.8333 18.75 24V40C18.75 42.25 19.625 44.1667 21.375 45.75C23.2917 47.25 25.5417 48 28.125 48H75V64H18.75ZM130.375 48C132.958 48 135.167 47.25 137 45.75C138.833 44.1667 139.75 42.25 139.75 40V24C139.75 21.8333 138.833 19.9583 137 18.375C135.167 16.7917 132.958 16 130.375 16H111.625C109.042 16 106.792 16.7917 104.875 18.375C103.125 19.9583 102.25 21.8333 102.25 24V40C102.25 42.25 103.125 44.1667 104.875 45.75C106.792 47.25 109.042 48 111.625 48H130.375ZM102.25 64C97 64 92.5417 62.4583 88.875 59.375C85.2917 56.2083 83.5 52.4167 83.5 48V16C83.5 11.5833 85.2917 7.83333 88.875 4.75C92.5417 1.58333 97 0 102.25 0H139.75C144.917 0 149.333 1.58333 153 4.75C156.667 7.91667 158.5 11.6667 158.5 16V48C158.5 52.5 156.667 56.2917 153 59.375C149.333 62.4583 144.917 64 139.75 64H102.25ZM167 64V16C167 11.5833 168.792 7.83333 172.375 4.75C176.042 1.58333 180.5 0 185.75 0H242V64H223.25V16H195.125C192.542 16 190.292 16.7917 188.375 18.375C186.625 19.9583 185.75 21.8333 185.75 24V64H167ZM278.625 64V16H250.5V0H325.5V16H297.375V64H278.625ZM352.75 64C347.5 64 343.042 62.4583 339.375 59.375C335.792 56.2083 334 52.4167 334 48V0H409V16H352.75V24H409V40H352.75V48H409V64H352.75ZM417.5 64V56L445.625 32L417.5 8V0H436.25L455 16L473.75 0H492.5V8L464.375 32L492.5 56V64H473.75L455 48L436.25 64H417.5ZM501 64V48H519.75V64H501ZM528.125 64V0H603.125C608.292 0 612.708 1.58333 616.375 4.75C620.042 7.91667 621.875 11.6667 621.875 16V64H603.125V24C603.125 21.8333 602.208 19.9583 600.375 18.375C598.542 16.7917 596.333 16 593.75 16H584.375V64H565.625V16H546.875V64H528.125ZM686.625 24V16H649.125V24H686.625ZM649.125 64C643.875 64 639.417 62.4583 635.75 59.375C632.167 56.2083 630.375 52.4167 630.375 48V16C630.375 11.5833 632.167 7.83333 635.75 4.75C639.417 1.58333 643.875 0 649.125 0H686.625C691.792 0 696.208 1.58333 699.875 4.75C703.542 7.91667 705.375 11.6667 705.375 16V32C705.375 34.25 704.458 36.1667 702.625 37.75C700.792 39.25 698.583 40 696 40H649.125V48H705.375V64H649.125ZM788.875 48V24C788.875 21.8333 787.958 19.9583 786.125 18.375C784.292 16.7917 782.083 16 779.5 16H760.75C758.167 16 755.958 16.7917 754.125 18.375C752.292 19.9583 751.375 21.8333 751.375 24V48H788.875ZM723.25 80V48H732.625V16C732.625 11.5833 734.458 7.83333 738.125 4.75C741.708 1.58333 746.125 0 751.375 0H788.875C794.042 0 798.458 1.58333 802.125 4.75C805.792 7.91667 807.625 11.6667 807.625 16V48H817V80H798.25V64H742V80H723.25ZM816.125 64V0H834.875V40L872.375 8V0H891.125V64H872.375V32L834.875 64H816.125ZM955.875 48V40H918.375V48H955.875ZM918.375 64C913.125 64 908.667 62.4583 905 59.375C901.417 56.2083 899.625 52.4167 899.625 48V32C899.625 29.8333 900.5 27.9583 902.25 26.375C904.083 24.7917 906.333 24 909 24H955.875V16H899.625V0H955.875C961.042 0 965.458 1.58333 969.125 4.75C972.792 7.91667 974.625 11.6667 974.625 16V48C974.625 52.5 972.792 56.2917 969.125 59.375C965.458 62.4583 961.042 64 955.875 64H918.375Z" fill="#065F46"/>
-    </svg>
-                        <p class="text-emerald-700 text-xs mt-1">Роль: {{ auth.login.value === 'admin_main' ? 'Администратор' : 'Рег. пользователь' }}</p>
-                    </div>
-                    
-                    <nav class="flex-1 p-4 space-y-2 overflow-y-auto pb-12">
-                        <!-- ВКЛАДКА ТОЛЬКО ДЛЯ РЕГИОНАЛЬНЫХ -->
-                        <a href="#" v-if="auth.login.value !== 'admin_main'" @click.prevent="switchTab('broadcasts')" :class="currentTab === 'broadcasts' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm flex items-center justify-between">
-                            <span>▶️ Трансляции</span>
-                            <span v-if="schedules.schedules.value.some(s => s.status === 'Активен')" class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-                        </a>
-
-                        <!-- ВКЛАДКА ТОЛЬКО ДЛЯ АДМИНА -->
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('media')" :class="currentTab === 'media' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📁 Медиатека</a>
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('playlists')" :class="currentTab === 'playlists' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📑 Плейлисты</a>
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📥 Импорт файлов</a>
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('trash')" :class="currentTab === 'trash' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🗑️ Корзина</a>
-                        
-                        <!-- ОБЩИЕ ВКЛАДКИ -->
-                        <a href="#" @click.prevent="switchTab('schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📅 Расписания</a>
-                        
-                        <!-- ВКЛАДКИ ТОЛЬКО ДЛЯ АДМИНА -->
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('monitoring')" :class="currentTab === 'monitoring' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🖥️ Мониторинг сети</a>
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('reports')" :class="currentTab === 'reports' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📊 Отчёты</a>
-                        <a href="#" v-if="auth.login.value === 'admin_main'" @click.prevent="switchTab('users')" :class="currentTab === 'users' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">👥 Пользователи <span v-if="users.adminRequests.value.length > 0" class="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-1">{{ users.adminRequests.value.length }}</span></a>
-                        
-                        <!-- ПРОФИЛЬ -->
-                        <a href="#" @click.prevent="switchTab('profile')" :class="currentTab === 'profile' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">👤 Профиль</a>
-                    </nav>
-                    
-                    <div class="p-4 border-t border-emerald-200 bg-emerald-100/40 text-left bg-emerald-50">
-                        <div class="mb-4">
-                            <p class="text-xs text-emerald-800 font-semibold mb-1 flex justify-between"><span>Хранилище</span><span>{{ media.storageStats.value.percent }}%</span></p>
-                            <div class="w-full bg-emerald-200 rounded-full h-1.5 mb-1">
-                                <div :class="media.storageStats.value.percent > 90 ? 'bg-red-500' : 'bg-emerald-500'" class="h-1.5 rounded-full" :style="{ width: media.storageStats.value.percent + '%' }"></div>
-                            </div>
-                            <p class="text-[10px] text-emerald-600">{{ formatSize(media.storageStats.value.used) }} из 100 ГБ</p>
-                        </div>
-                        <button @click="requestConfirm($event, 'Вы действительно хотите выйти из системы?', logoutHandler)" class="w-full bg-red-100 hover:bg-red-200 text-red-800 border border-red-300 px-4 py-2 rounded-lg text-sm transition font-medium text-center cursor-pointer border-0">Выйти</button>
-                    </div>
-                </aside>
+                <!-- ВЫНЕСЕННЫЙ МИКРО-КОМПОНЕНТ: БОКОВОЕ МЕНЮ -->
+                <Sidebar 
+                    :currentTab="currentTab" 
+                    @switchTab="switchTab" 
+                    @requestConfirm="(e, text, cb) => requestConfirm(e, text, cb)" 
+                    @logout="logoutHandler" 
+                />
 
                 <main class="flex-1 p-8 overflow-y-auto bg-white h-full text-sm text-left">
 
-                    <!-- НОВАЯ ВКЛАДКА: ТРАНСЛЯЦИИ (ТОЛЬКО ДЛЯ РЕГИОНАЛЬНЫХ МЕНЕДЖЕРОВ) -->
+                    <!-- Вкладка: Трансляции -->
                     <div v-if="currentTab === 'broadcasts' && auth.login.value !== 'admin_main'" class="space-y-6">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-6">
@@ -806,58 +714,11 @@ const activeMonitorSchedule = computed(() => {
                         </section>
                     </div>
 
-                    <!-- Вкладка: Медиатека (Только Админ) -->
-                    <div v-if="currentTab === 'media' && auth.login.value === 'admin_main'">
-                        <section class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
-                            <div class="flex justify-between items-center mb-6">
-                                <h2 class="text-xl font-semibold text-emerald-900">Интерфейс управления контентом</h2>
-                                <button @click="media.fetchFiles(); media.fetchStats()" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium cursor-pointer border-0">Обновить</button>
-                            </div>
-                            <div class="flex flex-col md:flex-row gap-3 mb-6 bg-white p-4 rounded-lg border border-emerald-200 shadow-sm">
-                                <input v-model="media.searchQuery.value" type="text" placeholder="Поиск по имени файла..." class="flex-1 bg-white text-emerald-950 border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
-                                <select v-model="media.filterCity.value" class="w-full md:w-48 bg-white text-emerald-950 border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
-                                    <option value="all">Все папки офисов</option>
-                                    <option value="global">Глобальная (global)</option>
-                                    <option value="moscow">Москва</option>
-                                    <option value="spb">Санкт-Петербург</option>
-                                    <option value="novocheboksarsk">Новочебоксарск</option>
-                                    <option value="yartsevo">Ярцево</option>
-                                    <option value="azov">Азов</option>
-                                    <option value="orenburg">Оренбург</option>
-                                    <option value="chernyakhovsk">Черняховск</option>
-                                </select>
-                                <select v-model="media.sortBy.value" class="w-full md:w-56 bg-white text-emerald-950 border border-emerald-300 rounded-lg p-2 text-sm focus:outline-none focus:border-emerald-600">
-                                    <option value="date_desc">Сначала новые</option>
-                                    <option value="date_asc">Сначала старые</option>
-                                    <option value="name_asc">По имени (А - Я)</option>
-                                    <option value="name_desc">По имени (Я - А)</option>
-                                    <option value="size_desc">Размер (большие сверху)</option>
-                                    <option value="size_asc">Размер (маленькие сверху)</option>
-                                </select>
-                            </div>
-                            <div v-if="media.filteredAndSortedFiles.value.length === 0" class="text-center py-8 text-emerald-700 bg-white rounded-lg border border-dashed border-emerald-200">Контент не найден.</div>
-                            <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                <div v-for="file in media.filteredAndSortedFiles.value" :key="file.name" class="bg-white border border-emerald-200 p-4 rounded-lg flex flex-col gap-3 shadow-sm hover:shadow-md transition">
-                                    <div class="flex items-center gap-3">
-                                        <div class="shrink-0 w-16 h-16 bg-slate-100 border border-emerald-100 rounded flex items-center justify-center overflow-hidden">
-                                            <img v-if="isImage(file.name)" :src="file.url" class="object-cover w-full h-full">
-                                            <video v-else-if="isVideo(file.name)" :src="file.url" class="object-cover w-full h-full" muted></video>
-                                            <span v-else class="text-xs font-bold text-emerald-400">ФАЙЛ</span>
-                                        </div>
-                                        <div class="overflow-hidden">
-                                            <p class="font-medium text-sm text-emerald-900 truncate" :title="file.name">{{ file.name }}</p>
-                                            <p class="text-[11px] text-emerald-600 mt-0.5">Размер: {{ formatSize(file.size) }}</p>
-                                            <p class="text-[11px] text-emerald-600">{{ formatDate(file.last_modified) }}</p>
-                                        </div>
-                                    </div>
-                                    <div class="flex gap-2 mt-auto">
-                                        <a :href="file.url" target="_blank" class="flex-1 text-center bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs px-3 py-1.5 rounded transition font-medium cursor-pointer">Смотреть</a>
-                                        <button @click="requestConfirm($event, 'Переместить файл в корзину?', () => media.deleteFile(file.name))" class="flex-1 bg-red-50 hover:bg-red-100 text-red-700 text-xs px-3 py-1.5 rounded border border-red-200 transition cursor-pointer">В корзину</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </section>
-                    </div>
+                    <!-- ВЫНЕСЕННЫЙ МИКРО-КОМПОНЕНТ: МЕДИАТЕКА -->
+                    <MediaLibrary 
+                        v-if="currentTab === 'media' && auth.login.value === 'admin_main'" 
+                        @requestConfirm="(e, text, cb) => requestConfirm(e, text, cb)" 
+                    />
 
                     <!-- Вкладка: Плейлисты (Только Админ) -->
                     <div v-if="currentTab === 'playlists' && auth.login.value === 'admin_main'" class="space-y-6">

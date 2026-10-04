@@ -9,21 +9,47 @@
     <!-- Стили и утилиты Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
+    <!-- Настройка плоского фирменного цвета СОЛТЕХ -->
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              // ПЕРЕКРАШИВАЕМ EMERALD (который используется во всем коде)
+              emerald: {
+                50: '#f4fbf7',  // Едва зеленый, почти белый фон
+                100: '#d1f0df', // Легкий фон при наведении 
+                200: '#a3e0c0', // Светлые рамки и разделители
+                300: '#75d1a0',
+                400: '#47c281',
+                500: '#11A653', 
+                600: '#11A653', // Активные плашки и кнопки (ТОЧНЫЙ ЦВЕТ ЛОГОТИПА)
+                700: '#11A653', // Текст "Роль" и ховеры
+                800: '#11A653', // Текст над полоской хранилища
+                900: '#0d8241', // Неактивные пункты меню (чуть темнее для читаемости)
+                950: '#064221', 
+              }
+            }
+          }
+        }
+      }
+    </script>
+
     <!-- Vue 3 (глобальная сборка) -->
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    
+
     <!-- Chart.js для аналитических графиков -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    
+
     <!-- Flatpickr (Календарь и выбор времени для расписаний) -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/ru.js"></script>
   </head>
   <body class="bg-white text-emerald-950 min-h-screen flex flex-col">
-    <!-- Точкамонтирования приложения Vue -->
+    <!-- Точка монтирования приложения Vue -->
     <div id="app"></div>
-    
+
     <!-- Главный скрипт Vite -->
     <script type="module" src="/src/main.js"></script>
   </body>

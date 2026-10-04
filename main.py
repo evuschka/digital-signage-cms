@@ -73,7 +73,6 @@ ALLOWED_EXTENSIONS = {'mp4', 'mov', 'mkv', 'webm', 'avi', 'jpeg', 'jpg', 'png', 
 SECRET_KEY = os.getenv("CMS_SECRET_KEY", "super_secret_production_key_2026")
 
 def generate_qr_hash(schedule_id: int) -> str:
-    """Генерирует криптографическую подпись для конкретной трансляции"""
     msg = f"signage_{schedule_id}".encode('utf-8')
     key = SECRET_KEY.encode('utf-8')
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
@@ -120,26 +119,11 @@ class FallbackSettings(BaseModel):
     file: str
 
 # ==========================================
-# КОНСТАНТЫ И БАЗА ДАННЫХ
+# БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ СПРАВОЧНИКОВ
 # ==========================================
 DEFAULT_USERS = {
     "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
     "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"}
-}
-
-SCREENS_DB = {
-    "moscow": ["Москва-Экран-1", "Москва-Экран-2", "Москва-Экран-3"],
-    "spb": ["СПБ-Экран-1", "СПБ-Экран-2"],
-    "novocheboksarsk": ["Новочебоксарск-Экран-1"],
-    "yartsevo": ["Ярцево-Экран-1"],
-    "azov": ["Азов-Экран-1"],
-    "orenburg": ["Оренбург-Экран-1"],
-    "chernyakhovsk": ["Черняховск-Экран-1"]
-}
-
-CITY_TZ_OFFSETS = {
-    "global": 3, "moscow": 3, "spb": 3, "novocheboksarsk": 3,
-    "yartsevo": 3, "azov": 3, "orenburg": 5, "chernyakhovsk": 2
 }
 
 def get_password_hash(password: str) -> str:
@@ -161,6 +145,21 @@ def get_db_connection():
 def init_db():
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
+        # Создаем таблицы справочников городов и экранов вместо хардкода
+        cursor.execute('''CREATE TABLE IF NOT EXISTS cities (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            tz_offset INTEGER DEFAULT 3,
+            tz_label TEXT DEFAULT 'МСК'
+        )''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS screens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city_id TEXT,
+            name TEXT UNIQUE,
+            FOREIGN KEY(city_id) REFERENCES cities(id)
+        )''')
+
         cursor.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, role TEXT NOT NULL, city_id TEXT NOT NULL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY, file TEXT, playlist_id INTEGER, city TEXT, screens TEXT, time_start TEXT, time_end TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY, name TEXT, city TEXT, items TEXT, "interval" INTEGER, repeats INTEGER)''')
@@ -173,16 +172,45 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_schedules_time ON schedules (time_start, time_end);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_playlists_city ON playlists (city);')
         
+        # Заполняем справочник городов (Seed data), если он пуст
+        cursor.execute('SELECT COUNT(*) FROM cities')
+        if cursor.fetchone()[0] == 0:
+            initial_cities = [
+                ("moscow", "Москва", 3, "МСК"),
+                ("spb", "Санкт-Петербург", 3, "МСК"),
+                ("novocheboksarsk", "Новочебоксарск", 3, "МСК"),
+                ("yartsevo", "Ярцево", 3, "МСК"),
+                ("azov", "Азов", 3, "МСК"),
+                ("orenburg", "Оренбург", 5, "МСК+2"),
+                ("chernyakhovsk", "Черняховск", 2, "МСК-1"),
+                ("global", "Вся сеть", 3, "МСК")
+            ]
+            cursor.executemany("INSERT OR IGNORE INTO cities (id, name, tz_offset, tz_label) VALUES (?, ?, ?, ?)", initial_cities)
+            
+            # Набор экранов по умолчанию
+            initial_screens = [
+                ("moscow", "Москва-Экран-1"), ("moscow", "Москва-Экран-2"), ("moscow", "Москва-Экран-3"),
+                ("spb", "СПБ-Экран-1"), ("spb", "СПБ-Экран-2"),
+                ("novocheboksarsk", "Новочебоксарск-Экран-1"),
+                ("yartsevo", "Ярцево-Экран-1"),
+                ("azov", "Азов-Экран-1"),
+                ("orenburg", "Оренбург-Экран-1"),
+                ("chernyakhovsk", "Черняховск-Экран-1")
+            ]
+            cursor.executemany("INSERT OR IGNORE INTO screens (city_id, name) VALUES (?, ?)", initial_screens)
+
+        # Проверка квоты хранилища
         row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
         if not row:
             initial_size = 0
             try:
                 response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
                 initial_size = sum(obj['Size'] for obj in response.get('Contents', []) if not obj['Key'].startswith('trash/'))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Ошибка при подсчете начального размера S3 (init_db): %s", e)
             cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(initial_size),))
 
+        # Создание дефолтного админа
         cursor.execute('SELECT COUNT(*) FROM users')
         if cursor.fetchone()[0] == 0:
             for uname, udata in DEFAULT_USERS.items():
@@ -191,6 +219,23 @@ def init_db():
         conn.commit()
 
 init_db()
+
+# Вспомогательные функции для работы со справочниками из БД вместо хардкода
+def get_city_offset(city: str) -> int:
+    with closing(get_db_connection()) as conn:
+        row = conn.execute("SELECT tz_offset FROM cities WHERE id = ?", (city,)).fetchone()
+        return row["tz_offset"] if row else 3
+
+def get_screens_dict() -> dict:
+    with closing(get_db_connection()) as conn:
+        screens_map = {}
+        rows = conn.execute("SELECT city_id, name FROM screens").fetchall()
+        for r in rows:
+            c_id = r["city_id"]
+            if c_id not in screens_map:
+                screens_map[c_id] = []
+            screens_map[c_id].append(r["name"])
+        return screens_map
 
 def log_action(username: str, action: str, details: str = ""):
     with closing(get_db_connection()) as conn:
@@ -214,23 +259,23 @@ def clean_old_records_sqlite():
             try:
                 if now - datetime.fromisoformat(row[1]) >= timedelta(days=365):
                     cursor.execute('DELETE FROM schedules WHERE id = ?', (row[0],))
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.error("Ошибка парсинга даты time_end в schedules (ID %s): %s", row[0], e)
                 
         cursor.execute('SELECT id, deleted_at FROM trash')
         for row in cursor.fetchall():
             try:
                 if now - datetime.fromisoformat(row[1]) >= timedelta(days=30):
                     cursor.execute('DELETE FROM trash WHERE id = ?', (row[0],))
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.error("Ошибка парсинга даты deleted_at в trash (ID %s): %s", row[0], e)
                 
         conn.commit()
 
 def get_dynamic_status(start_str, end_str, city):
     try:
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        offset = CITY_TZ_OFFSETS.get(city, 3)
+        offset = get_city_offset(city)
         now_local = now_utc + timedelta(hours=offset)
         start = datetime.fromisoformat(start_str)
         end = datetime.fromisoformat(end_str)
@@ -249,7 +294,7 @@ def get_total_bucket_size():
         return int(row["value"]) if row and row["value"] else 0
 
 # ==========================================
-# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ (ЕДИНСТВЕННЫЙ АДМИН)
+# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ
 # ==========================================
 def get_current_user(request: Request):
     auth = request.headers.get("Authorization")
@@ -259,7 +304,8 @@ def get_current_user(request: Request):
         encoded_credentials = auth.split(" ")[1]
         decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
         username, password = decoded_credentials.split(":", 1)
-    except Exception:
+    except Exception as e:
+        logger.warning("Ошибка декодирования Basic Auth: %s", e)
         raise HTTPException(status_code=401, detail="Неверные учетные данные")
 
     with closing(get_db_connection()) as conn:
@@ -308,7 +354,6 @@ def create_user(data: UserCreate, current_user: dict = Depends(get_current_user)
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403)
     
-    # ЗАЩИТА: В системе может быть только 1 единственный главный администратор
     if data.role == "admin":
         raise HTTPException(status_code=400, detail="В системе предусмотрен только один главный администратор.")
 
@@ -327,7 +372,6 @@ def delete_user(username: str, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403)
         
-    # ЗАЩИТА: Нельзя удалить главного администратора системы
     if username == "admin_main":
         raise HTTPException(status_code=400, detail="Нельзя удалить главного администратора системы!")
         
@@ -381,7 +425,8 @@ def get_server_ip(current_user: dict = Depends(get_current_user)):
         ip = s.getsockname()[0]
         s.close()
         return {"ip": ip}
-    except Exception:
+    except Exception as e:
+        logger.error("Не удалось определить сетевой IP сервера: %s", e)
         return {"ip": "127.0.0.1"}
 
 @app.get("/history/")
@@ -413,7 +458,8 @@ def get_monitoring(current_user: dict = Depends(get_current_user)):
         
     current_minute = int(time.time() / 60)
     status_list = []
-    for city, screens in SCREENS_DB.items():
+    screens_db = get_screens_dict()
+    for city, screens in screens_db.items():
         for sc in screens:
             random.seed(f"{sc}_{current_minute}")
             status_list.append({
@@ -450,7 +496,10 @@ def get_public_broadcast(schedule_id: int, hash: str):
         if s_dict["playlist_id"]:
             pl = conn.execute('SELECT items FROM playlists WHERE id = ?', (s_dict["playlist_id"],)).fetchone()
             if pl and pl["items"]:
-                items = json.loads(pl["items"])
+                try:
+                    items = json.loads(pl["items"])
+                except Exception as e:
+                    logger.error("Ошибка парсинга JSON элементов плейлиста (ID %s): %s", s_dict["playlist_id"], e)
         else:
             items = [{"file": s_dict["file"], "duration": 10}]
             
@@ -479,8 +528,8 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
             en = datetime.fromisoformat(s.get("time_end"))
             if en > st:
                 total_hours += (en - st).total_seconds() / 3600
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Ошибка вычисления длительности трансляции (ID %s): %s", s.get("id", "unknown"), e)
             
     planned_shows = status_counts["Ожидание"] + status_counts["Активен"]
             
@@ -497,7 +546,11 @@ def get_playlists(current_user: dict = Depends(get_current_user)):
         playlists = []
         for row in conn.execute('SELECT * FROM playlists').fetchall():
             p = dict(row)
-            p["items"] = json.loads(p["items"]) if p["items"] else []
+            try:
+                p["items"] = json.loads(p["items"]) if p["items"] else []
+            except Exception as e:
+                logger.error("Ошибка парсинга элементов плейлиста при чтении (ID %s): %s", p["id"], e)
+                p["items"] = []
             
             if current_user["role"] == "admin" or p["city"] == "global" or p["city"] == current_user["city_id"]:
                 playlists.append(p)
@@ -587,6 +640,7 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
         filename = f"{name}_{int(time.time())}{ex}"
         file_key = f"{folder}/{filename}"
     except ClientError:
+        # Ошибка 404 означает, что файла с таким именем нет в S3 - это нормальное поведение.
         pass
     
     try:
@@ -600,6 +654,7 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
             used = int(row["value"]) if row else file_size
             cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(max(0, used - file_size)),))
             conn.commit()
+        logger.error("Сетевая ошибка при загрузке файла %s в S3: %s", filename, e)
         raise e
         
     log_action(current_user["username"], "Импорт файла", f"Файл: {filename} в {folder}")
@@ -650,6 +705,7 @@ async def upload_fallback(file: UploadFile = File(...), current_user: dict = Dep
             used = int(row["value"]) if row else file_size
             cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(max(0, used - file_size)),))
             conn.commit()
+        logger.error("Сетевая ошибка при загрузке заглушки в S3: %s", e)
         raise e
         
     with closing(get_db_connection()) as conn:
@@ -831,7 +887,7 @@ def empty_trash(current_user: dict = Depends(get_current_user)):
                 s3_client.delete_object(Bucket=BUCKET_NAME, Key=t["data"])
                 log_storage_action(t["name"], "УДАЛЕНО НАВСЕГДА", 0, current_user["username"])
             except Exception as e:
-                logger.warning(f"Ошибка физического удаления {t['name']}: {e}")
+                logger.warning(f"Ошибка физического удаления из S3 {t['name']}: {e}")
                 
         conn.execute('DELETE FROM trash')
         conn.commit()
@@ -841,7 +897,7 @@ def empty_trash(current_user: dict = Depends(get_current_user)):
 
 @app.get("/screens/")
 def get_screens(current_user: dict = Depends(get_current_user)):
-    return {"screens": SCREENS_DB}
+    return {"screens": get_screens_dict()}
 
 @app.get("/schedules/")
 def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
@@ -850,7 +906,12 @@ def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depend
         schedules = []
         for row in conn.execute('SELECT * FROM schedules').fetchall():
             s = dict(row)
-            s["screens"] = json.loads(s["screens"]) if s["screens"] else []
+            try:
+                s["screens"] = json.loads(s["screens"]) if s["screens"] else []
+            except Exception as e:
+                logger.error("Ошибка парсинга JSON поля screens (ID %s): %s", s["id"], e)
+                s["screens"] = []
+                
             s["status"] = get_dynamic_status(s.get("time_start"), s.get("time_end"), s.get("city", "global"))
             s["qr_hash"] = generate_qr_hash(s["id"]) 
             schedules.append(s)
@@ -880,8 +941,8 @@ def get_active_schedule(city: str = "moscow", screen: int = 0):
                     try:
                         pl_items = json.loads(pl["items"])
                         items.extend(pl_items)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error("Ошибка чтения файлов из плейлиста ID %s: %s", playlist_id, e)
         elif s.get("file"):
             items.append({"file": s.get("file"), "duration": 10})
             
@@ -904,7 +965,7 @@ def create_schedule(item: ScheduleCreate, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=400, detail="Ошибка формата времени. Ожидается ISO 8601")
 
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    offset = CITY_TZ_OFFSETS.get(item.city, 3)
+    offset = get_city_offset(item.city)
     now_local = now_utc + timedelta(hours=offset)
 
     if new_en <= new_st:
@@ -928,6 +989,7 @@ def create_schedule(item: ScheduleCreate, current_user: dict = Depends(get_curre
             except Exception as e:
                 if isinstance(e, HTTPException):
                     raise e
+                logger.error("Ошибка при проверке конфликтов расписания (ID %s): %s", s.get("id"), e)
 
         sch_id = int(datetime.now().timestamp())
         conn.execute('INSERT INTO schedules (id, file, playlist_id, city, screens, time_start, time_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
