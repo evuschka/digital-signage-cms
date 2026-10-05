@@ -118,11 +118,14 @@ class ScheduleCreate(BaseModel):
 class FallbackSettings(BaseModel):
     file: str
 
+class ModerateAction(BaseModel):
+    file_key: str
+
 # ==========================================
 # БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ СПРАВОЧНИКОВ
 # ==========================================
 DEFAULT_USERS = {
-    "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
+    "admin_main": {"password": "admin123", "role": "admin_moderator", "city_id": "global"},
     "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"}
 }
 
@@ -145,7 +148,6 @@ def get_db_connection():
 def init_db():
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
-        # Создаем таблицы справочников городов и экранов вместо хардкода
         cursor.execute('''CREATE TABLE IF NOT EXISTS cities (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -168,11 +170,17 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, action TEXT NOT NULL, details TEXT, timestamp TEXT NOT NULL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS storage_history (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT NOT NULL, operation TEXT NOT NULL, size INTEGER, username TEXT NOT NULL, timestamp TEXT NOT NULL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS file_metadata (
+            s3_key TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'pending',
+            owner_city TEXT,
+            uploaded_by TEXT
+        )''')
 
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_schedules_time ON schedules (time_start, time_end);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_playlists_city ON playlists (city);')
         
-        # Заполняем справочник городов (Seed data), если он пуст
         cursor.execute('SELECT COUNT(*) FROM cities')
         if cursor.fetchone()[0] == 0:
             initial_cities = [
@@ -187,7 +195,6 @@ def init_db():
             ]
             cursor.executemany("INSERT OR IGNORE INTO cities (id, name, tz_offset, tz_label) VALUES (?, ?, ?, ?)", initial_cities)
             
-            # Набор экранов по умолчанию
             initial_screens = [
                 ("moscow", "Москва-Экран-1"), ("moscow", "Москва-Экран-2"), ("moscow", "Москва-Экран-3"),
                 ("spb", "СПБ-Экран-1"), ("spb", "СПБ-Экран-2"),
@@ -199,7 +206,6 @@ def init_db():
             ]
             cursor.executemany("INSERT OR IGNORE INTO screens (city_id, name) VALUES (?, ?)", initial_screens)
 
-        # Проверка квоты хранилища
         row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
         if not row:
             initial_size = 0
@@ -210,7 +216,6 @@ def init_db():
                 logger.error("Ошибка при подсчете начального размера S3 (init_db): %s", e)
             cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(initial_size),))
 
-        # Создание дефолтного админа
         cursor.execute('SELECT COUNT(*) FROM users')
         if cursor.fetchone()[0] == 0:
             for uname, udata in DEFAULT_USERS.items():
@@ -220,7 +225,6 @@ def init_db():
 
 init_db()
 
-# Вспомогательные функции для работы со справочниками из БД вместо хардкода
 def get_city_offset(city: str) -> int:
     with closing(get_db_connection()) as conn:
         row = conn.execute("SELECT tz_offset FROM cities WHERE id = ?", (city,)).fetchone()
@@ -260,7 +264,7 @@ def clean_old_records_sqlite():
                 if now - datetime.fromisoformat(row[1]) >= timedelta(days=365):
                     cursor.execute('DELETE FROM schedules WHERE id = ?', (row[0],))
             except ValueError as e:
-                logger.error("Ошибка парсинга даты time_end в schedules (ID %s): %s", row[0], e)
+                pass
                 
         cursor.execute('SELECT id, deleted_at FROM trash')
         for row in cursor.fetchall():
@@ -268,7 +272,7 @@ def clean_old_records_sqlite():
                 if now - datetime.fromisoformat(row[1]) >= timedelta(days=30):
                     cursor.execute('DELETE FROM trash WHERE id = ?', (row[0],))
             except ValueError as e:
-                logger.error("Ошибка парсинга даты deleted_at в trash (ID %s): %s", row[0], e)
+                pass
                 
         conn.commit()
 
@@ -293,8 +297,16 @@ def get_total_bucket_size():
         row = conn.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
         return int(row["value"]) if row and row["value"] else 0
 
+def get_city_bucket_size(city_id: str) -> int:
+    try:
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=f"{city_id}/")
+        return sum(obj['Size'] for obj in response.get('Contents', []) if not obj['Key'].startswith('trash/'))
+    except Exception as e:
+        logger.error("Ошибка при вычислении размера для %s: %s", city_id, e)
+        return 0
+
 # ==========================================
-# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ
+# АВТОРИЗАЦИЯ И ПОЛЬЗОВАТЕЛИ (УМНАЯ ЛОГИКА РОЛЕЙ)
 # ==========================================
 def get_current_user(request: Request):
     auth = request.headers.get("Authorization")
@@ -314,7 +326,20 @@ def get_current_user(request: Request):
     if not user or not verify_password(password, user["password"]):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
         
-    return {"username": user["username"], "role": user["role"], "city_id": user["city_id"]}
+    role = user["role"]
+    return {
+        "username": user["username"], 
+        "role": role, 
+        "city_id": user["city_id"],
+        "is_admin": role in ["admin", "admin_moderator"],
+        "is_moderator": role in ["moderator", "admin_moderator"],
+        "is_regional": role == "regional"
+    }
+
+@app.get("/me/")
+def get_me(current_user: dict = Depends(get_current_user)):
+    # Отдаем фронтенду актуальную инфу по пользователю
+    return current_user
 
 @app.post("/log-login/")
 def log_login_event(current_user: dict = Depends(get_current_user)):
@@ -340,7 +365,7 @@ def request_reset(request: Request, data: ResetRequest):
 
 @app.get("/admin/users/")
 def get_admin_users(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     with closing(get_db_connection()) as conn:
         users_safe = {row["username"]: {"role": row["role"], "city_id": row["city_id"]}
@@ -351,25 +376,27 @@ def get_admin_users(current_user: dict = Depends(get_current_user)):
 
 @app.post("/admin/users/")
 def create_user(data: UserCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     
-    if data.role == "admin":
-        raise HTTPException(status_code=400, detail="В системе предусмотрен только один главный администратор.")
+    # Строго проверяем возможные роли (исключаем недопустимые комбинации с региональным)
+    valid_roles = ["regional", "moderator", "admin", "admin_moderator"]
+    if data.role not in valid_roles:
+        raise HTTPException(status_code=400, detail="Указана несуществующая комбинация роли")
 
     with closing(get_db_connection()) as conn:
         if conn.execute('SELECT * FROM users WHERE username = ?', (data.username,)).fetchone():
             raise HTTPException(status_code=400, detail="Пользователь уже существует")
         conn.execute('INSERT INTO users (username, password, role, city_id) VALUES (?, ?, ?, ?)',
-                     (data.username, get_password_hash(data.password), "regional", data.city_id))
+                     (data.username, get_password_hash(data.password), data.role, data.city_id))
         conn.commit()
         
-    log_action(current_user["username"], "Создание пользователя", f"Логин: {data.username}, Филиал: {data.city_id}")
-    return {"message": "Региональный пользователь успешно создан"}
+    log_action(current_user["username"], "Создание пользователя", f"Логин: {data.username}, Роль: {data.role}")
+    return {"message": "Пользователь успешно создан"}
 
 @app.delete("/admin/users/{username}")
 def delete_user(username: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
         
     if username == "admin_main":
@@ -388,7 +415,7 @@ def delete_user(username: str, current_user: dict = Depends(get_current_user)):
 
 @app.post("/admin/reset-password/")
 def admin_reset_password(data: AdminReset, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     with closing(get_db_connection()) as conn:
         if not conn.execute('SELECT * FROM users WHERE username = ?', (data.username,)).fetchone():
@@ -431,7 +458,7 @@ def get_server_ip(current_user: dict = Depends(get_current_user)):
 
 @app.get("/history/")
 def get_history(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     with closing(get_db_connection()) as conn:
         logs = [dict(row) for row in conn.execute('SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT 200').fetchall()]
@@ -439,7 +466,7 @@ def get_history(current_user: dict = Depends(get_current_user)):
 
 @app.get("/storage-history/")
 def get_storage_history(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     with closing(get_db_connection()) as conn:
         history = [dict(row) for row in conn.execute('SELECT * FROM storage_history ORDER BY timestamp DESC LIMIT 200').fetchall()]
@@ -447,13 +474,17 @@ def get_storage_history(current_user: dict = Depends(get_current_user)):
 
 @app.get("/storage-stats/")
 def get_storage_stats(current_user: dict = Depends(get_current_user)):
-    size = get_total_bucket_size()
+    if current_user["is_admin"] or current_user["is_moderator"]:
+        size = get_total_bucket_size()
+    else:
+        size = get_city_bucket_size(current_user["city_id"])
+        
     percent = (size / MAX_STORAGE_BYTES) * 100
     return {"used": size, "max": MAX_STORAGE_BYTES, "percent": round(percent, 2)}
 
 @app.get("/monitoring/")
 def get_monitoring(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403, detail="Доступ к мониторингу разрешен только администраторам")
         
     current_minute = int(time.time() / 60)
@@ -507,7 +538,7 @@ def get_public_broadcast(schedule_id: int, hash: str):
 
 @app.get("/analytics/")
 def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     background_tasks.add_task(clean_old_records_sqlite)
     
@@ -529,7 +560,7 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
             if en > st:
                 total_hours += (en - st).total_seconds() / 3600
         except Exception as e:
-            logger.error("Ошибка вычисления длительности трансляции (ID %s): %s", s.get("id", "unknown"), e)
+            pass
             
     planned_shows = status_counts["Ожидание"] + status_counts["Активен"]
             
@@ -540,6 +571,9 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
         "city_counts": city_counts
     }
 
+# ==========================================
+# ИНТЕГРАЦИЯ УПРАВЛЕНИЯ ПЛЕЙЛИСТАМИ
+# ==========================================
 @app.get("/playlists/")
 def get_playlists(current_user: dict = Depends(get_current_user)):
     with closing(get_db_connection()) as conn:
@@ -549,22 +583,29 @@ def get_playlists(current_user: dict = Depends(get_current_user)):
             try:
                 p["items"] = json.loads(p["items"]) if p["items"] else []
             except Exception as e:
-                logger.error("Ошибка парсинга элементов плейлиста при чтении (ID %s): %s", p["id"], e)
                 p["items"] = []
             
-            if current_user["role"] == "admin" or p["city"] == "global" or p["city"] == current_user["city_id"]:
+            if current_user["is_admin"] or current_user["is_moderator"] or p["city"] == "global" or p["city"] == current_user["city_id"]:
                 playlists.append(p)
                 
     return {"playlists": playlists}
 
 @app.post("/playlists/")
 def create_playlist(item: PlaylistCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    p_id = int(datetime.now().timestamp())
+    if current_user["is_regional"] and item.city != current_user["city_id"]:
+        raise HTTPException(status_code=403, detail="Вы можете создавать плейлисты только для своего филиала")
+        
     items_json = json.dumps([i.model_dump() for i in item.items], ensure_ascii=False)
     
     with closing(get_db_connection()) as conn:
+        meta_rows = conn.execute("SELECT s3_key, status FROM file_metadata").fetchall()
+        meta_dict = {row["s3_key"]: row["status"] for row in meta_rows}
+        
+        for pl_item in item.items:
+            if meta_dict.get(pl_item.file, "approved") != "approved":
+                raise HTTPException(status_code=400, detail=f"Файл {pl_item.file} еще не одобрен модератором!")
+
+        p_id = int(datetime.now().timestamp())
         conn.execute('INSERT INTO playlists (id, name, city, items, "interval", repeats) VALUES (?, ?, ?, ?, ?, ?)',
                      (p_id, item.name, item.city, items_json, item.interval, item.repeats))
         conn.commit()
@@ -574,9 +615,6 @@ def create_playlist(item: PlaylistCreate, current_user: dict = Depends(get_curre
 
 @app.put("/playlists/{playlist_id}")
 def update_playlist(playlist_id: int, item: PlaylistCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Только администратор может редактировать плейлисты")
-    
     items_json = json.dumps([i.model_dump() for i in item.items], ensure_ascii=False)
     
     with closing(get_db_connection()) as conn:
@@ -584,6 +622,16 @@ def update_playlist(playlist_id: int, item: PlaylistCreate, current_user: dict =
         if not row:
             raise HTTPException(status_code=404, detail="Плейлист не найден")
             
+        if current_user["is_regional"]:
+            if row["city"] != current_user["city_id"] or item.city != current_user["city_id"]:
+                raise HTTPException(status_code=403, detail="Вы не можете редактировать чужие плейлисты")
+        
+        meta_rows = conn.execute("SELECT s3_key, status FROM file_metadata").fetchall()
+        meta_dict = {m_row["s3_key"]: m_row["status"] for m_row in meta_rows}
+        for pl_item in item.items:
+            if meta_dict.get(pl_item.file, "approved") != "approved":
+                raise HTTPException(status_code=400, detail=f"Файл {pl_item.file} не одобрен модератором!")
+
         conn.execute('''UPDATE playlists SET name = ?, city = ?, items = ?, "interval" = ?, repeats = ? WHERE id = ?''',
                      (item.name, item.city, items_json, item.interval, item.repeats, playlist_id))
         conn.commit()
@@ -593,25 +641,36 @@ def update_playlist(playlist_id: int, item: PlaylistCreate, current_user: dict =
 
 @app.delete("/playlists/{playlist_id}")
 def delete_playlist(playlist_id: int, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Доступ запрещен")
-        
     with closing(get_db_connection()) as conn:
+        row = conn.execute('SELECT city FROM playlists WHERE id = ?', (playlist_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Плейлист не найден")
+            
+        if current_user["is_regional"] and row["city"] != current_user["city_id"]:
+            raise HTTPException(status_code=403, detail="Доступ запрещен")
+            
         conn.execute('DELETE FROM playlists WHERE id = ?', (playlist_id,))
         conn.commit()
         
     log_action(current_user["username"], "Удаление плейлиста", f"ID плейлиста: {playlist_id}")
     return {"message": "Плейлист удален"}
 
+# ==========================================
+# ИНТЕГРАЦИЯ УПРАВЛЕНИЯ ФАЙЛАМИ И МОДЕРАЦИИ
+# ==========================================
 @app.post("/upload/")
 async def upload_file(file: UploadFile = File(...), target_city: str = Form(None), current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    
     filename = os.path.basename(file.filename or "")
     ext = filename.split(".")[-1].lower() if "." in filename else ""
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Формат '.{ext}' не поддерживается.")
+    
+    if current_user["is_regional"]:
+        target_city = current_user["city_id"]
+        status = "pending"
+    else:
+        target_city = target_city if target_city else "global"
+        status = "approved"
     
     file.file.seek(0, 2)
     file_size = file.file.tell()
@@ -631,7 +690,7 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
         cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
         conn.commit()
     
-    folder = target_city if target_city else "global"
+    folder = target_city
     file_key = f"{folder}/{filename}"
     
     try:
@@ -640,7 +699,6 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
         filename = f"{name}_{int(time.time())}{ex}"
         file_key = f"{folder}/{filename}"
     except ClientError:
-        # Ошибка 404 означает, что файла с таким именем нет в S3 - это нормальное поведение.
         pass
     
     try:
@@ -657,147 +715,88 @@ async def upload_file(file: UploadFile = File(...), target_city: str = Form(None
         logger.error("Сетевая ошибка при загрузке файла %s в S3: %s", filename, e)
         raise e
         
-    log_action(current_user["username"], "Импорт файла", f"Файл: {filename} в {folder}")
+    with closing(get_db_connection()) as conn:
+        conn.execute('INSERT OR REPLACE INTO file_metadata (s3_key, status, owner_city, uploaded_by) VALUES (?, ?, ?, ?)',
+                     (file_key, status, folder, current_user["username"]))
+        conn.commit()
+        
+    log_action(current_user["username"], "Импорт файла", f"Файл: {filename} в {folder} (Статус: {status})")
     log_storage_action(file_key, "ЗАГРУЗКА", file_size, current_user["username"])
-    return {"success": True, "message": f"Файл {filename} импортирован в {folder}"}
+    return {"success": True, "message": f"Файл загружен. Статус: {status}"}
 
-@app.post("/settings/fallback/upload")
-async def upload_fallback(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    
-    filename = os.path.basename(file.filename or "")
-    ext = filename.split(".")[-1].lower() if "." in filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Формат '.{ext}' не поддерживается.")
-    
-    file.file.seek(0, 2)
-    file_size = file.file.tell()
-    file.file.seek(0)
+@app.post("/moderate/{action}")
+def moderate_file(action: str, data: ModerateAction, current_user: dict = Depends(get_current_user)):
+    if not (current_user["is_admin"] or current_user["is_moderator"]):
+        raise HTTPException(status_code=403, detail="Только модератор или администратор могут проверять контент")
+        
+    if action not in ["approve", "reject"]:
+        raise HTTPException(status_code=400, detail="Недопустимое действие модерации")
+        
+    new_status = "approved" if action == "approve" else "rejected"
     
     with closing(get_db_connection()) as conn:
-        cursor = conn.cursor()
-        cursor.execute("BEGIN IMMEDIATE;")
-        row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
-        current_used = int(row["value"]) if row else 0
-        
-        if current_used + file_size > MAX_STORAGE_BYTES:
-            conn.rollback()
-            raise HTTPException(status_code=400, detail="Превышен лимит хранилища в 100 ГБ")
-        
-        new_used = current_used + file_size
-        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
-        conn.commit()
-    
-    folder = "system"
-    name, ex = os.path.splitext(filename)
-    new_filename = f"fallback_{int(time.time())}{ex}"
-    file_key = f"{folder}/{new_filename}"
-    
-    try:
-        content_type, _ = mimetypes.guess_type(filename)
-        s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key, ExtraArgs={'ContentType': content_type or 'application/octet-stream'})
-    except Exception as e:
-        with closing(get_db_connection()) as conn:
-            cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE;")
-            row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
-            used = int(row["value"]) if row else file_size
-            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(max(0, used - file_size)),))
-            conn.commit()
-        logger.error("Сетевая ошибка при загрузке заглушки в S3: %s", e)
-        raise e
-        
-    with closing(get_db_connection()) as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (file_key,))
+        conn.execute("UPDATE file_metadata SET status = ? WHERE s3_key = ?", (new_status, data.file_key))
+        if conn.execute("SELECT changes()").fetchone()[0] == 0:
+            conn.execute("INSERT INTO file_metadata (s3_key, status, owner_city, uploaded_by) VALUES (?, ?, ?, ?)",
+                         (data.file_key, new_status, "global", "system"))
         conn.commit()
         
-    log_action(current_user["username"], "Настройка системы", f"Загружена новая фоновая заглушка: {filename}")
-    log_storage_action(file_key, "ЗАГРУЗКА ЗАГЛУШКИ", file_size, current_user["username"])
-    return {"message": "Заглушка сохранена", "file": file_key}
-
-@app.get("/settings/fallback")
-def get_fallback():
-    with closing(get_db_connection()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
-        return {"file": row["value"] if row else ""}
-
-@app.post("/settings/fallback")
-def set_fallback(data: FallbackSettings, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    with closing(get_db_connection()) as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (data.file,))
-        conn.commit()
-    log_action(current_user["username"], "Настройка системы", f"Установлена фоновая заглушка: {data.file}")
-    return {"message": "Заглушка сохранена"}
-
-@app.get("/media-file/{file_key:path}")
-def get_media_file(file_key: str, request: Request):
-    decoded_key = urllib.parse.unquote(file_key)
-    try:
-        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=decoded_key)
-        file_data = response['Body'].read()
-        
-        content_type, _ = mimetypes.guess_type(decoded_key)
-        if not content_type:
-            content_type = response.get('ContentType', 'application/octet-stream')
-        
-        if decoded_key.lower().endswith('.mp4'):
-            content_type = 'video/mp4'
-
-        file_size = len(file_data)
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Access-Control-Allow-Origin": "*"
-        }
-        
-        client_range = request.headers.get("range")
-        if client_range:
-            start_str, end_str = client_range.replace("bytes=", "").split("-")
-            start = int(start_str)
-            end = int(end_str) if end_str else file_size - 1
-            
-            chunk = file_data[start:end+1]
-            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-            headers["Content-Length"] = str(len(chunk))
-            
-            return Response(content=chunk, status_code=206, media_type=content_type, headers=headers)
-        
-        headers["Content-Length"] = str(file_size)
-        return Response(content=file_data, status_code=200, media_type=content_type, headers=headers)
-        
-    except ClientError as e:
-        logger.error(f"S3 proxy error for {decoded_key}: {e}")
-        raise HTTPException(status_code=404, detail="Файл не найден в хранилище")
+    log_action(current_user["username"], "Модерация", f"Файл {data.file_key} получил статус: {new_status}")
+    return {"message": f"Файл получил статус: {new_status}"}
 
 @app.get("/files/")
 @limiter.limit("60/minute")
 def list_files(request: Request, current_user: dict = Depends(get_current_user)):
-    prefix = "" if current_user["role"] == "admin" else f"{current_user['city_id']}/"
-    response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
+    prefixes_to_check = [""] if (current_user["is_admin"] or current_user["is_moderator"]) else ["global/", f"{current_user['city_id']}/"]
+    
+    with closing(get_db_connection()) as conn:
+        meta_rows = conn.execute("SELECT * FROM file_metadata").fetchall()
+        meta_dict = {row["s3_key"]: dict(row) for row in meta_rows}
+        
     files_list = []
     
-    for obj in response.get("Contents", []):
-        if not obj["Key"].startswith("trash/") and not obj["Key"].startswith("system/"):
-            parts = obj["Key"].split('/')
+    for prefix in prefixes_to_check:
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
+        for obj in response.get("Contents", []):
+            key = obj["Key"]
+            if key.startswith("trash/") or key.startswith("system/"):
+                continue
+                
+            meta = meta_dict.get(key, {"status": "approved", "owner_city": "global", "uploaded_by": "system"})
+            
+            if current_user["is_regional"]:
+                if meta["owner_city"] == "global" and meta["status"] != "approved":
+                    continue
+                if meta["owner_city"] not in ["global", current_user["city_id"]]:
+                    continue
+            
+            parts = key.split('/')
             encoded_key = "/".join(urllib.parse.quote(p) for p in parts)
             files_list.append({
-                "name": obj["Key"], 
+                "name": key, 
                 "size": obj["Size"], 
                 "last_modified": obj["LastModified"].isoformat(),
-                "url": f"http://localhost:8000/media-file/{encoded_key}"
+                "url": f"http://localhost:8000/media-file/{encoded_key}",
+                "status": meta["status"],
+                "owner_city": meta["owner_city"],
+                "uploaded_by": meta["uploaded_by"]
             })
-    return {"files": files_list}
+            
+    unique_files = {f["name"]: f for f in files_list}.values()
+    return {"files": list(unique_files)}
 
 @app.delete("/files/{file_key:path}")
 def delete_file(file_key: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    
     decoded_key = urllib.parse.unquote(file_key)
     if ".." in decoded_key:
         raise HTTPException(status_code=400, detail="Недопустимое имя файла")
+
+    with closing(get_db_connection()) as conn:
+        meta = conn.execute("SELECT owner_city FROM file_metadata WHERE s3_key = ?", (decoded_key,)).fetchone()
+        owner_city = meta["owner_city"] if meta else "global"
+        
+        if current_user["is_regional"] and owner_city != current_user["city_id"]:
+            raise HTTPException(status_code=403, detail="Вы не можете удалять чужие файлы")
 
     try:
         obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=decoded_key)
@@ -826,9 +825,166 @@ def delete_file(file_key: str, current_user: dict = Depends(get_current_user)):
         logger.error(f"S3 Error on delete: {e}")
         raise HTTPException(status_code=500, detail="Файл не найден в S3 или ошибка доступа")
 
+# ==========================================
+# УПРАВЛЕНИЕ РАСПИСАНИЯМИ
+# ==========================================
+@app.post("/schedules/")
+def create_schedule(item: ScheduleCreate, current_user: dict = Depends(get_current_user)):
+    if current_user["is_regional"] and item.city != current_user["city_id"]:
+        raise HTTPException(status_code=403, detail="Доступ запрещен. Вы можете планировать расписание только для своего филиала.")
+        
+    try:
+        new_st = datetime.fromisoformat(item.time_start)
+        new_en = datetime.fromisoformat(item.time_end)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Ошибка формата времени. Ожидается ISO 8601")
+
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    offset = get_city_offset(item.city)
+    now_local = now_utc + timedelta(hours=offset)
+
+    if new_en <= new_st:
+        raise HTTPException(status_code=400, detail="Время окончания должно быть позже начала.")
+    if new_st < now_local - timedelta(minutes=2):
+        raise HTTPException(status_code=400, detail=f"Нельзя запланировать в прошлом! Местное время: {now_local.strftime('%H:%M')}.")
+
+    with closing(get_db_connection()) as conn:
+        if item.file:
+            meta = conn.execute("SELECT status FROM file_metadata WHERE s3_key = ?", (item.file,)).fetchone()
+            if meta and meta["status"] != "approved":
+                raise HTTPException(status_code=400, detail="Выбранный файл еще не одобрен модератором!")
+
+        existing_schedules = [dict(row) for row in conn.execute('SELECT * FROM schedules').fetchall()]
+        for s in existing_schedules:
+            try:
+                s_st = datetime.fromisoformat(s.get("time_start"))
+                s_en = datetime.fromisoformat(s.get("time_end"))
+                if new_st < s_en and s_st < new_en:
+                    s_scr = json.loads(s.get("screens", "[]"))
+                    if not s_scr and not item.screens and s.get("city") == item.city:
+                        raise HTTPException(status_code=400, detail=f"Конфликт: Экраны филиала {item.city} уже заняты в это время.")
+                    overlap = set(item.screens).intersection(set(s_scr))
+                    if overlap:
+                        raise HTTPException(status_code=400, detail=f"Конфликт времени на экранах: {', '.join(overlap)}")
+            except Exception as e:
+                pass
+
+        sch_id = int(datetime.now().timestamp())
+        conn.execute('INSERT INTO schedules (id, file, playlist_id, city, screens, time_start, time_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                     (sch_id, item.file, item.playlist_id, item.city, json.dumps(item.screens), item.time_start, item.time_end))
+        conn.commit()
+    
+    tgt = f"Плейлист ID {item.playlist_id}" if item.playlist_id else f"Файл {item.file}"
+    log_action(current_user["username"], "Планирование", f"Запуск: {tgt}, Город: {item.city}")
+    return {"message": "Расписание сохранено"}
+
+@app.delete("/schedules/{schedule_id}")
+def delete_schedule(schedule_id: int, current_user: dict = Depends(get_current_user)):
+    with closing(get_db_connection()) as conn:
+        row = conn.execute('SELECT city FROM schedules WHERE id = ?', (schedule_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404)
+        if current_user["is_regional"] and row["city"] != current_user["city_id"]:
+            raise HTTPException(status_code=403, detail="Вы не можете удалять чужие расписания")
+            
+        conn.execute('DELETE FROM schedules WHERE id = ?', (schedule_id,))
+        conn.commit()
+    log_action(current_user["username"], "Удаление", f"ID расписания: {schedule_id}")
+    return {"message": "Удалено"}
+
+@app.get("/schedules/")
+def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
+    background_tasks.add_task(clean_old_records_sqlite)
+    with closing(get_db_connection()) as conn:
+        schedules = []
+        for row in conn.execute('SELECT * FROM schedules').fetchall():
+            s = dict(row)
+            try:
+                s["screens"] = json.loads(s["screens"]) if s["screens"] else []
+            except Exception as e:
+                s["screens"] = []
+                
+            s["status"] = get_dynamic_status(s.get("time_start"), s.get("time_end"), s.get("city", "global"))
+            s["qr_hash"] = generate_qr_hash(s["id"]) 
+            schedules.append(s)
+            
+    if current_user["is_regional"]:
+        schedules = [s for s in schedules if s.get("city") in [current_user["city_id"], "global"]]
+    return {"schedules": schedules}
+
+# ==========================================
+# ОСТАЛЬНЫЕ МАРШРУТЫ (НАСТРОЙКИ СИСТЕМЫ И ПР.)
+# ==========================================
+@app.post("/settings/fallback/upload")
+async def upload_fallback(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    if not current_user["is_admin"]:
+        raise HTTPException(status_code=403)
+    filename = os.path.basename(file.filename or "")
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Формат '.{ext}' не поддерживается.")
+    
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE;")
+        row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+        current_used = int(row["value"]) if row else 0
+        if current_used + file_size > MAX_STORAGE_BYTES:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail="Превышен лимит хранилища в 100 ГБ")
+        new_used = current_used + file_size
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(new_used),))
+        conn.commit()
+    
+    folder = "system"
+    name, ex = os.path.splitext(filename)
+    new_filename = f"fallback_{int(time.time())}{ex}"
+    file_key = f"{folder}/{new_filename}"
+    
+    try:
+        content_type, _ = mimetypes.guess_type(filename)
+        s3_client.upload_fileobj(file.file, BUCKET_NAME, file_key, ExtraArgs={'ContentType': content_type or 'application/octet-stream'})
+    except Exception as e:
+        with closing(get_db_connection()) as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE;")
+            row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
+            used = int(row["value"]) if row else file_size
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(max(0, used - file_size)),))
+            conn.commit()
+        raise e
+        
+    with closing(get_db_connection()) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (file_key,))
+        conn.commit()
+        
+    log_action(current_user["username"], "Настройка системы", f"Загружена новая фоновая заглушка: {filename}")
+    log_storage_action(file_key, "ЗАГРУЗКА ЗАГЛУШКИ", file_size, current_user["username"])
+    return {"message": "Заглушка сохранена", "file": file_key}
+
+@app.get("/settings/fallback")
+def get_fallback():
+    with closing(get_db_connection()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
+        return {"file": row["value"] if row else ""}
+
+@app.post("/settings/fallback")
+def set_fallback(data: FallbackSettings, current_user: dict = Depends(get_current_user)):
+    if not current_user["is_admin"]:
+        raise HTTPException(status_code=403)
+    with closing(get_db_connection()) as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_file', ?)", (data.file,))
+        conn.commit()
+    log_action(current_user["username"], "Настройка системы", f"Установлена фоновая заглушка: {data.file}")
+    return {"message": "Заглушка сохранена"}
+
 @app.get("/trash/")
 def get_trash(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     background_tasks.add_task(clean_old_records_sqlite)
     with closing(get_db_connection()) as conn:
@@ -837,7 +993,7 @@ def get_trash(background_tasks: BackgroundTasks, current_user: dict = Depends(ge
 
 @app.post("/trash/restore/{file_name:path}")
 def restore_file(file_name: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     
     decoded_name = urllib.parse.unquote(file_name)
@@ -878,7 +1034,7 @@ def restore_file(file_name: str, current_user: dict = Depends(get_current_user))
 
 @app.delete("/trash/empty/")
 def empty_trash(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
+    if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     with closing(get_db_connection()) as conn:
         trashed = conn.execute('SELECT name, data FROM trash').fetchall()
@@ -895,120 +1051,44 @@ def empty_trash(current_user: dict = Depends(get_current_user)):
     log_action(current_user["username"], "Очистка корзины", "Все файлы удалены безвозвратно")
     return {"message": "Корзина очищена"}
 
-@app.get("/screens/")
-def get_screens(current_user: dict = Depends(get_current_user)):
-    return {"screens": get_screens_dict()}
-
-@app.get("/schedules/")
-def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    background_tasks.add_task(clean_old_records_sqlite)
-    with closing(get_db_connection()) as conn:
-        schedules = []
-        for row in conn.execute('SELECT * FROM schedules').fetchall():
-            s = dict(row)
-            try:
-                s["screens"] = json.loads(s["screens"]) if s["screens"] else []
-            except Exception as e:
-                logger.error("Ошибка парсинга JSON поля screens (ID %s): %s", s["id"], e)
-                s["screens"] = []
-                
-            s["status"] = get_dynamic_status(s.get("time_start"), s.get("time_end"), s.get("city", "global"))
-            s["qr_hash"] = generate_qr_hash(s["id"]) 
-            schedules.append(s)
-            
-    if current_user["role"] != "admin":
-        schedules = [s for s in schedules if s.get("city") in [current_user["city_id"], "global"]]
-    return {"schedules": schedules}
-
-@app.get("/schedules/active")
-def get_active_schedule(city: str = "moscow", screen: int = 0):
-    with closing(get_db_connection()) as conn:
-        schedules = [dict(row) for row in conn.execute('SELECT * FROM schedules').fetchall()]
-    
-    filtered = []
-    for s in schedules:
-        s_city = s.get("city", "global")
-        if city == "global" or s_city == city or s_city == "global":
-            filtered.append(s)
-            
-    items = []
-    for s in filtered:
-        playlist_id = s.get("playlist_id")
-        if playlist_id:
-            with closing(get_db_connection()) as conn:
-                pl = conn.execute('SELECT items FROM playlists WHERE id = ?', (playlist_id,)).fetchone()
-                if pl and pl["items"]:
-                    try:
-                        pl_items = json.loads(pl["items"])
-                        items.extend(pl_items)
-                    except Exception as e:
-                        logger.error("Ошибка чтения файлов из плейлиста ID %s: %s", playlist_id, e)
-        elif s.get("file"):
-            items.append({"file": s.get("file"), "duration": 10})
-            
-    if not items:
-        with closing(get_db_connection()) as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key = 'fallback_file'").fetchone()
-            if row and row["value"]:
-                items.append({"file": row["value"], "duration": 10})
-                
-    return {"items": items}
-
-@app.post("/schedules/")
-def create_schedule(item: ScheduleCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
+@app.get("/media-file/{file_key:path}")
+def get_media_file(file_key: str, request: Request):
+    decoded_key = urllib.parse.unquote(file_key)
     try:
-        new_st = datetime.fromisoformat(item.time_start)
-        new_en = datetime.fromisoformat(item.time_end)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Ошибка формата времени. Ожидается ISO 8601")
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=decoded_key)
+        file_data = response['Body'].read()
+        
+        content_type, _ = mimetypes.guess_type(decoded_key)
+        if not content_type:
+            content_type = response.get('ContentType', 'application/octet-stream')
+        
+        if decoded_key.lower().endswith('.mp4'):
+            content_type = 'video/mp4'
 
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    offset = get_city_offset(item.city)
-    now_local = now_utc + timedelta(hours=offset)
-
-    if new_en <= new_st:
-        raise HTTPException(status_code=400, detail="Время окончания должно быть позже начала.")
-    if new_st < now_local - timedelta(minutes=2):
-        raise HTTPException(status_code=400, detail=f"Нельзя запланировать в прошлом! Местное время: {now_local.strftime('%H:%M')}.")
-
-    with closing(get_db_connection()) as conn:
-        existing_schedules = [dict(row) for row in conn.execute('SELECT * FROM schedules').fetchall()]
-        for s in existing_schedules:
-            try:
-                s_st = datetime.fromisoformat(s.get("time_start"))
-                s_en = datetime.fromisoformat(s.get("time_end"))
-                if new_st < s_en and s_st < new_en:
-                    s_scr = json.loads(s.get("screens", "[]"))
-                    if not s_scr and not item.screens and s.get("city") == item.city:
-                        raise HTTPException(status_code=400, detail=f"Конфликт: Экраны филиала {item.city} уже заняты в это время.")
-                    overlap = set(item.screens).intersection(set(s_scr))
-                    if overlap:
-                        raise HTTPException(status_code=400, detail=f"Конфликт времени на экранах: {', '.join(overlap)}")
-            except Exception as e:
-                if isinstance(e, HTTPException):
-                    raise e
-                logger.error("Ошибка при проверке конфликтов расписания (ID %s): %s", s.get("id"), e)
-
-        sch_id = int(datetime.now().timestamp())
-        conn.execute('INSERT INTO schedules (id, file, playlist_id, city, screens, time_start, time_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                     (sch_id, item.file, item.playlist_id, item.city, json.dumps(item.screens), item.time_start, item.time_end))
-        conn.commit()
-    
-    tgt = f"Плейлист ID {item.playlist_id}" if item.playlist_id else f"Файл {item.file}"
-    log_action(current_user["username"], "Планирование", f"Запуск: {tgt}, Город: {item.city}")
-    return {"message": "Расписание сохранено"}
-
-@app.delete("/schedules/{schedule_id}")
-def delete_schedule(schedule_id: int, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403)
-    with closing(get_db_connection()) as conn:
-        conn.execute('DELETE FROM schedules WHERE id = ?', (schedule_id,))
-        conn.commit()
-    log_action(current_user["username"], "Удаление", f"ID расписания: {schedule_id}")
-    return {"message": "Удалено"}
+        file_size = len(file_data)
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*"
+        }
+        
+        client_range = request.headers.get("range")
+        if client_range:
+            start_str, end_str = client_range.replace("bytes=", "").split("-")
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+            
+            chunk = file_data[start:end+1]
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+            headers["Content-Length"] = str(len(chunk))
+            
+            return Response(content=chunk, status_code=206, media_type=content_type, headers=headers)
+        
+        headers["Content-Length"] = str(file_size)
+        return Response(content=file_data, status_code=200, media_type=content_type, headers=headers)
+        
+    except ClientError as e:
+        logger.error(f"S3 proxy error for {decoded_key}: {e}")
+        raise HTTPException(status_code=404, detail="Файл не найден в хранилище")
 
 @app.get("/", response_class=HTMLResponse)
 def serve_frontend():

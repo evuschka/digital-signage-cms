@@ -91,12 +91,43 @@ export function useMedia(authHeader, login, showToast, safeJson) {
         xhr.send(formData);
     };
 
+    const moderateFile = async (fileKey, action) => {
+        try {
+            const res = await fetch(`/moderate/${action}`, {
+                method: 'POST',
+                headers: { 
+                    'Authorization': authHeader.value,
+                    'Content-Type': 'application/json' 
+                },
+                body: JSON.stringify({ file_key: fileKey })
+            });
+            if (res.ok) {
+                showToast(action === 'approve' ? 'Файл одобрен для показа' : 'Файл отклонен', 'success');
+                fetchFiles();
+            } else {
+                const data = await safeJson(res);
+                showToast(data.detail || 'Ошибка модерации', 'error');
+            }
+        } catch (e) {
+            showToast('Ошибка сети', 'error');
+        }
+    };
+
     const deleteFile = async (fileName) => {
-        await fetch(`/files/${encodeURIComponent(fileName)}`, { method: 'DELETE', headers: { 'Authorization': authHeader.value } });
-        fetchFiles(); 
-        fetchTrash(); 
-        fetchStats(); 
-        showToast('Перемещено в корзину', 'success');
+        try {
+            const res = await fetch(`/files/${encodeURIComponent(fileName)}`, { method: 'DELETE', headers: { 'Authorization': authHeader.value } });
+            if (res.ok) {
+                fetchFiles(); 
+                fetchTrash(); 
+                fetchStats(); 
+                showToast('Перемещено в корзину', 'success');
+            } else {
+                const data = await safeJson(res);
+                showToast(data.detail || 'Ошибка удаления', 'error');
+            }
+        } catch (e) {
+            showToast('Ошибка сети', 'error');
+        }
     };
 
     const restoreFile = async (fileName) => {
@@ -119,7 +150,7 @@ export function useMedia(authHeader, login, showToast, safeJson) {
         if (searchQuery.value) {
             result = result.filter(f => f.name.toLowerCase().includes(searchQuery.value.toLowerCase()));
         }
-        if (login.value === 'admin_main' && filterCity.value !== 'all') { 
+        if ((login.value === 'admin_main' || login.value === 'moderator') && filterCity.value !== 'all') { 
             result = result.filter(f => f.name.startsWith(filterCity.value + '/')); 
         }
         return result.slice().sort((a, b) => {
@@ -138,6 +169,7 @@ export function useMedia(authHeader, login, showToast, safeJson) {
     return { 
         files, trashFiles, searchQuery, filterCity, sortBy, selectedFile, selectedCity, 
         uploading, uploadError, uploadProgress, importLogs, storageStats, filteredAndSortedFiles, 
-        handleFileSelect, fetchFiles, fetchTrash, fetchStats, uploadFile, deleteFile, restoreFile, emptyTrash 
+        handleFileSelect, fetchFiles, fetchTrash, fetchStats, uploadFile, deleteFile, restoreFile, emptyTrash,
+        moderateFile
     };
 }

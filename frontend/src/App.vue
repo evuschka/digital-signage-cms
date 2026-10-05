@@ -8,15 +8,12 @@ import { useSchedules } from './composables/useSchedules.js';
 import { useUsers } from './composables/useUsers.js';
 import { useReports } from './composables/useReports.js';
 
-// ИМПОРТ НОВЫХ КОМПОНЕНТОВ
 import MobilePlayer from './components/MobilePlayer.vue';
 import Sidebar from './components/Sidebar.vue';
 import MediaLibrary from './components/MediaLibrary.vue';
 
-// Вспомогательные функции
 const { isImage, isVideo, formatSize, formatDate, getRemainingDays } = useHelpers();
 
-// Уведомления (тосты)
 const toasts = ref([]); 
 let toastIdCounter = 0;
 const showToast = (message, type = 'info') => {
@@ -30,7 +27,6 @@ const safeJson = async (res) => {
     catch (e) { return { detail: "Ошибка сервера" }; }
 };
 
-// Всплывающее окно подтверждения
 const confirmDialog = ref({ show: false, x: 0, y: 0, text: '', onConfirm: null, isBelow: false });
 const requestConfirm = (e, text, callback) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -40,7 +36,6 @@ const requestConfirm = (e, text, callback) => {
     confirmDialog.value = { show: true, x: posX, y: posY, text: text, onConfirm: callback, isBelow: isNearTop };
 };
 
-// Инициализация модулей
 const auth = useAuth();
 const users = useUsers(auth.authHeader, showToast, safeJson);
 const media = useMedia(auth.authHeader, auth.login, showToast, safeJson);
@@ -49,6 +44,41 @@ const schedules = useSchedules(auth.authHeader, showToast, requestConfirm, safeJ
 const reports = useReports(auth.authHeader, showToast, safeJson);
 
 const { chartStatusRef, chartCityRef } = reports;
+
+// ==========================================
+// ГЛОБАЛЬНЫЕ ПРАВА ДОСТУПА (Умная логика по ролям с сервера)
+// ==========================================
+const currentUserRole = ref('');
+const fetchMe = async () => {
+    try {
+        const res = await fetch('/me/', { headers: { 'Authorization': auth.authHeader.value } });
+        if (res.ok) {
+            const data = await safeJson(res);
+            currentUserRole.value = data.role || '';
+        }
+    } catch (e) {
+        console.error("Ошибка запроса /me/", e);
+    }
+};
+
+const currentUsername = computed(() => auth.login.value);
+
+const isAdmin = computed(() => {
+    if (currentUserRole.value) return currentUserRole.value === 'admin' || currentUserRole.value === 'admin_moderator';
+    return auth.login.value === 'admin_main'; 
+});
+const isModerator = computed(() => {
+    if (currentUserRole.value) return currentUserRole.value === 'moderator' || currentUserRole.value === 'admin_moderator';
+    const login = (auth.login.value || '').toLowerCase();
+    return login.includes('moderator') || login.startsWith('mod_');
+});
+const isRegional = computed(() => {
+    if (currentUserRole.value) return currentUserRole.value === 'regional';
+    return !isAdmin.value && !isModerator.value;
+});
+
+provide('roles', { isAdmin, isModerator, isRegional });
+
 const currentTab = ref(''); 
 
 const getFileUrl = (fileName) => {
@@ -60,7 +90,6 @@ const getFileUrl = (fileName) => {
     return `/media-file/${parts.map(p => encodeURIComponent(p)).join('/')}`;
 };
 
-// ПРОВАЙДИНГ ДЛЯ МИКРО-КОМПОНЕНТОВ
 provide('auth', auth);
 provide('media', media);
 provide('users', users);
@@ -70,9 +99,14 @@ provide('reports', reports);
 provide('getFileUrl', getFileUrl);
 provide('helpers', { isImage, isVideo, formatSize, formatDate, getRemainingDays });
 
-// ==========================================
-// ЛОГИКА АРХИВА РАСПИСАНИЙ
-// ==========================================
+// НАДЕЖНЫЕ ОБЕРТКИ ДЛЯ КНОПОК
+const openAddUserModal = () => { users.showAddUserModal.value = true; };
+const closeAddUserModal = () => { users.showAddUserModal.value = false; };
+const closeAdminAlert = () => { auth.showAdminAlertModal.value = false; switchTab('users'); };
+const closePlaylistModal = () => { playlists.showPlaylistModal.value = false; };
+const closeScheduleModal = () => { schedules.showAddModal.value = false; };
+const closeQrModal = () => { showQrModal.value = false; };
+
 const showArchive = ref(false);
 
 const isScheduleArchived = (schedule) => {
@@ -96,9 +130,6 @@ const displaySchedules = computed(() => {
     }
 });
 
-// ==========================================
-// ЛОГИКА ФОНОВОЙ ЗАГЛУШКИ (ИЗОЛИРОВАННАЯ ЗАГРУЗКА)
-// ==========================================
 const fallbackFile = ref('');
 const fallbackFileInput = ref(null);
 const isFallbackUploading = ref(false);
@@ -173,9 +204,6 @@ const clearFallback = async () => {
     }
 };
 
-// ==========================================
-// ЛОГИКА ДОСТУПА ПО QR-КОДУ (РЕЖИМ ЗРИТЕЛЯ)
-// ==========================================
 const urlParams = new URLSearchParams(window.location.search);
 const isMobileViewer = ref(!!urlParams.get('viewer_id'));
 
@@ -196,9 +224,7 @@ const openQr = async (schedule) => {
                     guessedIp = data.ip; 
                 }
             }
-        } catch (e) {
-            console.error("Не удалось получить сетевой IP сервера", e);
-        }
+        } catch (e) {}
         
         const userIp = prompt("Подтвердите IP-адрес для зрителей (Wi-Fi):", guessedIp === '172.19.0.1' ? '172.20.10.4' : guessedIp);
         
@@ -216,9 +242,8 @@ const openQr = async (schedule) => {
     showQrModal.value = true;
 };
 
-// Функция загрузки всех данных
 const loadAllData = async () => {
-    if (auth.login.value === 'admin_main') {
+    if (isAdmin.value) {
         await users.fetchAdminUsers();
         if (users.adminRequests.value.length > 0) auth.showAdminAlertModal.value = true;
         reports.fetchMonitoring();
@@ -229,15 +254,15 @@ const loadAllData = async () => {
     schedules.fetchScreens(); 
     schedules.fetchSchedules();
     fetchFallback();
-    if (auth.login.value === 'admin_main') media.fetchTrash();
+    if (isAdmin.value) media.fetchTrash();
 };
 
-// Загрузка при старте
 let clockInterval = null;
 onMounted(async () => {
     if (isMobileViewer.value) { return; }
     if (auth.isAuthenticated.value) {
-        currentTab.value = auth.login.value === 'admin_main' ? 'media' : 'broadcasts';
+        await fetchMe();
+        currentTab.value = (isAdmin.value || isModerator.value) ? 'media' : 'broadcasts';
         await loadAllData();
     }
     if (clockInterval) clearInterval(clockInterval);
@@ -245,22 +270,21 @@ onMounted(async () => {
 });
 onUnmounted(() => { if (clockInterval) clearInterval(clockInterval); });
 
-// ОБРАБОТКА ВХОДА
 const authenticate = async () => {
     const success = await auth.doLogin();
     if (success) {
+        await fetchMe();
         try { await fetch('/log-login/', { method: 'POST', headers: { 'Authorization': auth.authHeader.value } }); } 
-        catch (e) { console.error("Ошибка записи лога", e); }
-        currentTab.value = auth.login.value === 'admin_main' ? 'media' : 'broadcasts';
+        catch (e) {}
+        currentTab.value = (isAdmin.value || isModerator.value) ? 'media' : 'broadcasts';
         await loadAllData();
     }
 };
 
-// ОБРАБОТКА ВЫХОДА
 const logoutHandler = async () => {
     if (auth.isAuthenticated.value) {
         try { await fetch('/log-logout/', { method: 'POST', headers: { 'Authorization': auth.authHeader.value } }); } 
-        catch (e) { console.error("Ошибка записи лога", e); }
+        catch (e) {}
     }
     auth.doLogout();
     media.files.value = []; media.trashFiles.value = [];
@@ -268,7 +292,6 @@ const logoutHandler = async () => {
     currentTab.value = ''; auth.showAdminAlertModal.value = false;
 };
 
-// Переключение вкладок
 const switchTab = (tab) => {
     currentTab.value = tab;
     if (tab === 'reports') { reports.fetchAnalytics(); reports.fetchHistory(); reports.fetchStorageHistory(); }
@@ -282,9 +305,6 @@ const getPlaylistName = (id) => {
     return pl ? pl.name : 'Неизвестный';
 };
 
-// ==========================================
-// ЛОГИКА ЖИВОГО ПЛЕЕРА ДЛЯ ТРАНСЛЯЦИЙ (FULLSCREEN)
-// ==========================================
 const activeLiveBroadcast = ref(null);
 const liveItems = ref([]);
 const liveIndex = ref(0);
@@ -321,10 +341,6 @@ const stopLiveBroadcast = () => {
     if (liveTimer) clearTimeout(liveTimer);
 };
 
-
-// ==========================================
-// ЛОГИКА ПРОФИЛЯ
-// ==========================================
 const profileForm = ref({ oldPassword: '', newPassword: '', confirmPassword: '', error: '', success: '' });
 
 const updatePassword = async () => {
@@ -352,9 +368,6 @@ const updatePassword = async () => {
     } catch (e) { profileForm.value.error = 'Ошибка сети'; }
 };
 
-// ==========================================
-// ЛОГИКА ЦЕЛЕВЫХ ЭКРАНОВ И ВРЕМЕНИ
-// ==========================================
 const fallbackScreens = {
     moscow: ['Москва-Экран-1', 'Москва-Экран-2', 'Москва-Экран-3'],
     spb: ['СПБ-Экран-1', 'СПБ-Экран-2'],
@@ -408,9 +421,6 @@ const updateLocalClock = () => {
     localCityTimeDisplay.value = cityDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 };
 
-// ==========================================
-// ЛОГИКА ПЛЕЕРА ТРАНСЛЯЦИЙ ДЛЯ АДМИНА (МОНИТОРИНГ)
-// ==========================================
 const monitorSelectedCity = ref('moscow');
 const monitorSelectedScreen = ref('Москва-Экран-1');
 
@@ -420,7 +430,6 @@ const handleMonitorCityChange = () => {
     monitorSelectedScreen.value = screens.length > 0 ? screens[0] : '';
 };
 
-// Встроенная логика Фоновой заглушки
 const activeMonitorSchedule = computed(() => {
     if (!monitorSelectedCity.value || !monitorSelectedScreen.value) return null;
     const list = schedules.schedules?.value || [];
@@ -432,27 +441,17 @@ const activeMonitorSchedule = computed(() => {
         }
         return true;
     });
-    
     if (active) return active;
-    
-    if (fallbackFile.value) {
-        return { id: 'ЗАГЛУШКА', file: fallbackFile.value, is_fallback: true };
-    }
-    
+    if (fallbackFile.value) return { id: 'ЗАГЛУШКА', file: fallbackFile.value, is_fallback: true };
     return null;
 });
 </script>
 
 <template>
 <div class="bg-white text-emerald-950 min-h-screen flex flex-col font-sans">
-    
-    <!-- ВЫНЕСЕННЫЙ МИКРО-КОМПОНЕНТ: МОБИЛЬНЫЙ ПЛЕЕР (ЗРИТЕЛЬ) -->
     <MobilePlayer v-if="isMobileViewer" />
     
-    <!-- СТАНДАРТНАЯ СИСТЕМА УПРАВЛЕНИЯ (СКРЫВАЕТСЯ ДЛЯ ЗРИТЕЛЕЙ) -->
     <template v-else>
-        
-        <!-- ПОЛНОЭКРАННЫЙ ЖИВОЙ ПЛЕЕР ДЛЯ ТРАНСЛЯЦИЙ -->
         <div v-if="activeLiveBroadcast" class="fixed inset-0 z-[10000] bg-black flex flex-col justify-center items-center">
             <button @click="stopLiveBroadcast" class="absolute top-6 right-6 z-[10001] bg-white/10 hover:bg-red-600 text-white border border-white/20 rounded-lg px-6 py-3 font-bold opacity-0 hover:opacity-100 transition-all duration-300 cursor-pointer shadow-2xl backdrop-blur-md uppercase tracking-wider">
                 ✖ Закрыть трансляцию
@@ -467,7 +466,6 @@ const activeMonitorSchedule = computed(() => {
         </div>
 
         <div class="flex h-screen overflow-hidden relative">
-            <!-- Тосты (Уведомления) -->
             <div class="fixed top-6 right-6 z-[9999] flex flex-col gap-3 pointer-events-none">
                 <transition-group 
                     enter-active-class="transition duration-300 ease-out transform" enter-from-class="opacity-0 translate-x-8" enter-to-class="opacity-100 translate-x-0"
@@ -487,7 +485,6 @@ const activeMonitorSchedule = computed(() => {
                 </transition-group>
             </div>
 
-            <!-- Экран авторизации -->
             <div v-if="!auth.isAuthenticated.value" class="w-full max-w-md mx-auto mt-16 bg-emerald-50 p-8 rounded-xl border border-emerald-200 shadow-xl self-start">
                 <h2 class="text-2xl font-bold mb-6 text-emerald-800 text-center">Вход в систему</h2>
                 
@@ -511,8 +508,7 @@ const activeMonitorSchedule = computed(() => {
             </div>
 
             <template v-else>
-                <!-- Алерт для админа о сбросе паролей -->
-                <div v-if="auth.showAdminAlertModal.value && auth.login.value === 'admin_main'" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                <div v-if="auth.showAdminAlertModal.value && isAdmin" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div class="bg-white p-6 rounded-xl max-w-md w-full border border-emerald-200 shadow-2xl text-center">
                         <div class="text-amber-600 text-3xl mb-2">🔔</div>
                         <h3 class="text-lg font-bold text-emerald-900 mb-2">Внимание, запросы сброса!</h3>
@@ -522,11 +518,10 @@ const activeMonitorSchedule = computed(() => {
                                 • Пользователь: <span class="font-semibold">{{ req.username }}</span> ({{ req.time }})
                             </div>
                         </div>
-                        <button @click="auth.showAdminAlertModal.value = false; switchTab('users')" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-medium cursor-pointer border-0">Перейти к управлению</button>
+                        <button @click="closeAdminAlert" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-medium cursor-pointer border-0">Перейти к управлению</button>
                     </div>
                 </div>
 
-                <!-- ВЫНЕСЕННЫЙ МИКРО-КОМПОНЕНТ: БОКОВОЕ МЕНЮ -->
                 <Sidebar 
                     :currentTab="currentTab" 
                     @switchTab="switchTab" 
@@ -536,8 +531,7 @@ const activeMonitorSchedule = computed(() => {
 
                 <main class="flex-1 p-8 overflow-y-auto bg-white h-full text-sm text-left">
 
-                    <!-- Вкладка: Трансляции -->
-                    <div v-if="currentTab === 'broadcasts' && auth.login.value !== 'admin_main'" class="space-y-6">
+                    <div v-if="currentTab === 'broadcasts' && isRegional" class="space-y-6">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-6">
                                 <h2 class="text-xl font-semibold text-emerald-900">Ваш пульт управления трансляциями</h2>
@@ -546,7 +540,7 @@ const activeMonitorSchedule = computed(() => {
                             
                             <div v-if="schedules.schedules.value.filter(s => s.status !== 'Завершен').length === 0" class="text-center py-12 text-emerald-600 bg-white border border-dashed border-emerald-200 rounded-lg shadow-sm">
                                 <span class="text-4xl block mb-3 opacity-50">☕</span>
-                                Нет активных или ожидающих трансляций для вашего филиала.
+                                <p class="mt-2">Нет активных или ожидающих трансляций для вашего филиала.</p>
                             </div>
                             
                             <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -604,13 +598,12 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Вкладка: Пользователи (Только Админ) -->
-                    <div v-if="currentTab === 'users' && auth.login.value === 'admin_main'" class="space-y-6">
+                    <div v-if="currentTab === 'users' && isAdmin" class="space-y-6">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-6">
                                 <h2 class="text-xl font-semibold text-emerald-900">Управление учетными записями</h2>
                                 <div class="flex gap-2">
-                                    <button @click="users.showAddUserModal.value = true" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-md font-medium shadow-sm cursor-pointer border-0">+ Новый пользователь</button>
+                                    <button @click="openAddUserModal" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-md font-medium shadow-sm cursor-pointer border-0">+ Новый пользователь</button>
                                     <button @click="users.fetchAdminUsers" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium cursor-pointer border-0">Обновить</button>
                                 </div>
                             </div>
@@ -630,7 +623,9 @@ const activeMonitorSchedule = computed(() => {
                                         <label class="block text-xs text-emerald-700 mb-1 font-medium">Роль</label>
                                         <select v-model="users.newUserForm.value.role" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
                                             <option value="regional">Региональный (Филиал)</option>
-                                            <option value="admin">Администратор (Полный доступ)</option>
+                                            <option value="moderator">Модератор (Проверка контента)</option>
+                                            <option value="admin">Администратор (Управление системой)</option>
+                                            <option value="admin_moderator">Администратор + Модератор</option>
                                         </select>
                                     </div>
                                     <div>
@@ -648,7 +643,7 @@ const activeMonitorSchedule = computed(() => {
                                     </div>
                                 </div>
                                 <div class="flex justify-end gap-3">
-                                    <button @click="users.showAddUserModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm cursor-pointer border-0">Отмена</button>
+                                    <button @click="closeAddUserModal" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm cursor-pointer border-0">Отмена</button>
                                     <button @click="users.createUser" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm cursor-pointer border-0">Создать пользователя</button>
                                 </div>
                             </div>
@@ -679,7 +674,9 @@ const activeMonitorSchedule = computed(() => {
                                     <tbody>
                                         <tr v-for="(info, uname) in users.adminUsers.value" :key="uname" class="border-b border-emerald-200 hover:bg-emerald-50">
                                             <td class="px-6 py-4 font-medium">{{ uname }}</td>
-                                            <td class="px-6 py-4">{{ info.role === 'admin' ? 'Администратор' : 'Региональный' }}</td>
+                                            <td class="px-6 py-4">
+                                                {{ info.role === 'admin' ? 'Администратор' : info.role === 'moderator' ? 'Модератор' : info.role === 'admin_moderator' ? 'Админ + Модератор' : 'Региональный' }}
+                                            </td>
                                             <td class="px-6 py-4">{{ info.city_id }}</td>
                                             <td class="px-6 py-4 flex gap-2">
                                                 <button @click="requestConfirm($event, `Сбросить пароль для ${uname}?`, () => users.forceReset(uname))" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded transition cursor-pointer border-0">Сбросить пароль</button>
@@ -698,8 +695,12 @@ const activeMonitorSchedule = computed(() => {
                             <h2 class="text-xl font-semibold text-emerald-900 mb-6">Настройки профиля</h2>
                             <div class="mb-8 p-4 bg-white rounded-lg border border-emerald-200">
                                 <p class="text-sm text-emerald-600 mb-2">Текущий пользователь:</p>
-                                <p class="font-semibold text-emerald-900 text-lg">{{ auth.login.value }}</p>
-                                <p class="text-sm text-emerald-700 mt-1">Роль: {{ auth.login.value === 'admin_main' ? 'Администратор' : 'Региональный менеджер' }}</p>
+                                <p class="font-semibold text-emerald-900 text-lg">{{ currentUsername }}</p>
+                                <p class="text-sm text-emerald-700 mt-1">Роль: {{ 
+                                    currentUserRole === 'admin' ? 'Администратор' : 
+                                    currentUserRole === 'admin_moderator' ? 'Администратор + Модератор' :
+                                    currentUserRole === 'moderator' ? 'Модератор (Проверка контента)' : 'Региональный пользователь' 
+                                }}</p>
                             </div>
                             <div class="p-5 bg-white rounded-lg border border-emerald-200">
                                 <h3 class="font-medium text-emerald-900 mb-4">Смена пароля</h3>
@@ -714,14 +715,13 @@ const activeMonitorSchedule = computed(() => {
                         </section>
                     </div>
 
-                    <!-- ВЫНЕСЕННЫЙ МИКРО-КОМПОНЕНТ: МЕДИАТЕКА -->
                     <MediaLibrary 
-                        v-if="currentTab === 'media' && auth.login.value === 'admin_main'" 
+                        v-if="currentTab === 'media'" 
                         @requestConfirm="(e, text, cb) => requestConfirm(e, text, cb)" 
                     />
 
-                    <!-- Вкладка: Плейлисты (Только Админ) -->
-                    <div v-if="currentTab === 'playlists' && auth.login.value === 'admin_main'" class="space-y-6">
+                    <!-- Вкладка: Плейлисты (Админ и Регионал) -->
+                    <div v-if="currentTab === 'playlists' && !isModerator" class="space-y-6">
                         <div class="flex justify-between items-center">
                             <h2 class="text-xl font-semibold text-emerald-900">Управление плейлистами (Фото/Видео ряды)</h2>
                             <button @click="playlists.openCreateModal()" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Создать плейлист</button>
@@ -738,7 +738,7 @@ const activeMonitorSchedule = computed(() => {
                                 </div>
                                 <div>
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
-                                    <select v-model="playlists.newPlaylist.value.city" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600">
+                                    <select v-model="playlists.newPlaylist.value.city" :disabled="!isAdmin" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2 text-sm focus:outline-none focus:border-emerald-600 disabled:bg-emerald-100 disabled:text-emerald-800 disabled:opacity-80 disabled:cursor-not-allowed">
                                         <option value="global">Вся сеть</option>
                                         <option value="moscow">Москва</option>
                                         <option value="spb">Санкт-Петербург</option>
@@ -794,7 +794,7 @@ const activeMonitorSchedule = computed(() => {
                             </div>
 
                             <div class="flex justify-end gap-3">
-                                <button @click="playlists.showPlaylistModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition cursor-pointer border-0">Отмена</button>
+                                <button @click="closePlaylistModal" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition cursor-pointer border-0">Отмена</button>
                                 <button @click="playlists.savePlaylist" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm hover:bg-emerald-700 transition cursor-pointer border-0">
                                     {{ playlists.editingPlaylistId && playlists.editingPlaylistId.value ? 'Сохранить изменения' : 'Сохранить плейлист' }}
                                 </button>
@@ -851,8 +851,8 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Вкладка: Импорт файлов (Только Админ) -->
-                    <div v-if="currentTab === 'import' && auth.login.value === 'admin_main'" class="space-y-6">
+                    <!-- Вкладка: Импорт файлов (Админ и Регионал) -->
+                    <div v-if="currentTab === 'import' && !isModerator" class="space-y-6">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <h2 class="text-xl font-semibold mb-2 text-emerald-900">Импорт контента</h2>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
@@ -861,7 +861,7 @@ const activeMonitorSchedule = computed(() => {
                                     <h3 class="text-sm font-semibold text-emerald-900">Параметры</h3>
                                     <div>
                                         <label class="block text-xs text-emerald-700 mb-1 font-medium">Целевой филиал:</label>
-                                        <select v-model="media.selectedCity.value" class="w-full bg-white text-emerald-950 border border-emerald-300 text-sm rounded-lg p-2.5 focus:outline-none focus:border-emerald-600">
+                                        <select v-model="media.selectedCity.value" :disabled="!isAdmin" class="w-full bg-white text-emerald-950 border border-emerald-300 text-sm rounded-lg p-2.5 focus:outline-none focus:border-emerald-600 disabled:bg-emerald-100 disabled:text-emerald-800 disabled:opacity-80 disabled:cursor-not-allowed">
                                             <option value="global">Вся сеть (Все города)</option>
                                             <option value="moscow">Москва</option>
                                             <option value="spb">Санкт-Петербург</option>
@@ -901,7 +901,7 @@ const activeMonitorSchedule = computed(() => {
                     </div>
 
                     <!-- Вкладка: Корзина (Только Админ) -->
-                    <div v-if="currentTab === 'trash' && auth.login.value === 'admin_main'">
+                    <div v-if="currentTab === 'trash' && isAdmin">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-4">
                                 <h2 class="text-xl font-semibold text-emerald-900">Корзина (хранение до 30 дней)</h2>
@@ -928,8 +928,8 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Вкладка: РАСПИСАНИЯ -->
-                    <div v-if="currentTab === 'schedule'" class="space-y-6">
+                    <!-- Вкладка: РАСПИСАНИЯ (Админ и Регионал) -->
+                    <div v-if="currentTab === 'schedule' && !isModerator" class="space-y-6">
                         
                         <!-- ШАПКА С КНОПКОЙ АРХИВА -->
                         <div class="flex justify-between items-center">
@@ -940,12 +940,12 @@ const activeMonitorSchedule = computed(() => {
                                 <button @click="showArchive = !showArchive" class="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 px-4 py-2 rounded-lg text-sm shadow-sm transition cursor-pointer border-0 font-medium">
                                     {{ showArchive ? '← К активному графику' : '🗄 Архив' }}
                                 </button>
-                                <button v-if="auth.login.value === 'admin_main' && !showArchive" @click="schedules.openScheduleModal" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
+                                <button v-if="!showArchive" @click="schedules.openScheduleModal" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
                             </div>
                         </div>
 
                         <!-- ПАНЕЛЬ ЗАГЛУШКИ (Только для Админа) -->
-                        <div v-if="auth.login.value === 'admin_main' && !showArchive" class="bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
+                        <div v-if="isAdmin && !showArchive" class="bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
                             <div>
                                 <h3 class="font-bold text-white text-base flex items-center gap-2">📺 Фоновое вещание (Заглушка)</h3>
                                 <p class="text-xs text-slate-300 mt-1">Отдельный файл, который играет, когда нет активных трансляций.</p>
@@ -993,7 +993,7 @@ const activeMonitorSchedule = computed(() => {
 
                                 <div class="sm:col-span-2">
                                     <label class="block text-xs text-emerald-700 mb-1 font-medium">Филиал (Город)</label>
-                                    <select v-model="schedules.newSchedule.value.city" @change="handleCityChange" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600">
+                                    <select v-model="schedules.newSchedule.value.city" @change="handleCityChange" :disabled="!isAdmin" class="w-full bg-white text-emerald-950 border border-emerald-300 rounded p-2.5 text-sm focus:outline-none focus:border-emerald-600 disabled:bg-emerald-100 disabled:text-emerald-800 disabled:opacity-80 disabled:cursor-not-allowed">
                                         <option value="global">Вся сеть</option>
                                         <option value="moscow">Москва</option>
                                         <option value="spb">Санкт-Петербург</option>
@@ -1036,7 +1036,7 @@ const activeMonitorSchedule = computed(() => {
                                 </div>
                             </div>
                             <div class="flex justify-end gap-3 pt-2">
-                                <button @click="schedules.showAddModal.value = false" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition cursor-pointer border-0">Отмена</button>
+                                <button @click="closeScheduleModal" class="bg-emerald-200 text-emerald-900 px-4 py-2 rounded text-sm hover:bg-emerald-300 transition cursor-pointer border-0">Отмена</button>
                                 <button @click="schedules.addSchedule($event)" class="bg-emerald-600 text-white px-4 py-2 rounded text-sm hover:bg-emerald-700 transition cursor-pointer border-0">Сохранить</button>
                             </div>
                         </div>
@@ -1049,7 +1049,7 @@ const activeMonitorSchedule = computed(() => {
                                         <th class="px-6 py-3">Филиал / Экраны</th>
                                         <th class="px-6 py-3">Время (Местное)</th>
                                         <th class="px-6 py-3">Статус</th>
-                                        <th v-if="auth.login.value === 'admin_main'" class="px-6 py-3">Действия</th>
+                                        <th v-if="isAdmin" class="px-6 py-3">Действия</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1080,7 +1080,7 @@ const activeMonitorSchedule = computed(() => {
                                                 'bg-slate-200 text-slate-600': item.status === 'Завершен'
                                             }">{{ item.status }}</span>
                                         </td>
-                                        <td v-if="auth.login.value === 'admin_main'" class="px-6 py-4">
+                                        <td v-if="isAdmin" class="px-6 py-4">
                                             <button v-if="item.status === 'Активен'" @click="openQr(item)" class="text-blue-600 text-xs hover:underline bg-transparent border-0 cursor-pointer mr-3">QR-код</button>
                                             <button @click="requestConfirm($event, 'Удалить из расписания?', () => schedules.deleteSchedule(item.id))" class="text-red-700 text-xs hover:underline bg-transparent border-0 cursor-pointer">Удалить</button>
                                         </td>
@@ -1094,7 +1094,7 @@ const activeMonitorSchedule = computed(() => {
                     </div>
 
                     <!-- ВКЛАДКА МОНИТОРИНГ (Только Админ) -->
-                    <div v-if="currentTab === 'monitoring' && auth.login.value === 'admin_main'">
+                    <div v-if="currentTab === 'monitoring' && isAdmin">
                         <div class="space-y-6">
                             <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                                 <div class="flex justify-between items-center mb-6">
@@ -1178,7 +1178,7 @@ const activeMonitorSchedule = computed(() => {
                     </div>
 
                     <!-- ВКЛАДКА ОТЧЕТЫ (Только Админ) -->
-                    <div v-if="currentTab === 'reports' && auth.login.value === 'admin_main'">
+                    <div v-if="currentTab === 'reports' && isAdmin">
                         <div class="space-y-6">
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm flex flex-col justify-center items-center">
@@ -1310,7 +1310,7 @@ const activeMonitorSchedule = computed(() => {
         <!-- МОДАЛЬНОЕ ОКНО QR-КОДА -->
         <div v-if="showQrModal" class="fixed inset-0 bg-black/60 z-[200] flex items-center justify-center p-4 backdrop-blur-sm">
             <div class="bg-white rounded-2xl max-w-sm w-full p-8 text-center shadow-2xl relative border border-emerald-200">
-                <button @click="showQrModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-gray-800 text-xl font-bold bg-transparent border-0 cursor-pointer">✕</button>
+                <button @click="closeQrModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-800 text-xl font-bold bg-transparent border-0 cursor-pointer">✕</button>
                 <h3 class="text-lg font-bold text-emerald-900 mb-2">Доступ к трансляции</h3>
                 <p class="text-xs text-gray-500 mb-6">Отсканируйте код камерой смартфона, чтобы открыть прямой эфир</p>
                 
@@ -1322,6 +1322,6 @@ const activeMonitorSchedule = computed(() => {
             </div>
         </div>
 
-    </template> <!-- Конец условия v-else для обычного интерфейса -->
+    </template>
 </div>
 </template>
