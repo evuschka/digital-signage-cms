@@ -1,9 +1,10 @@
 <script setup>
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 
 const props = defineProps({
     auth: Object,
-    changePasswordHandler: Function
+    schedules: Object,
+    toast: Function
 });
 
 const passwordForm = ref({
@@ -13,6 +14,10 @@ const passwordForm = ref({
     error: '',
     success: ''
 });
+
+// Состояние для редактирования имени экрана
+const editingScreenId = ref(null);
+const editScreenName = ref('');
 
 const handlePasswordChange = async () => {
     passwordForm.value.error = '';
@@ -28,7 +33,6 @@ const handlePasswordChange = async () => {
         return;
     }
 
-    // Передаем текущий и новый пароль в composable авторизации
     try {
         const success = await props.auth.updatePasswordDirect(
             passwordForm.value.oldPassword, 
@@ -46,6 +50,54 @@ const handlePasswordChange = async () => {
         passwordForm.value.error = 'Ошибка при смене пароля';
     }
 };
+
+const startEditScreen = (screen) => {
+    editingScreenId.value = screen.id;
+    editScreenName.value = screen.name;
+};
+
+const saveScreenName = async (screenId) => {
+    if (!editScreenName.value.trim()) {
+        props.toast('Имя экрана не может быть пустым', 'warning');
+        return;
+    }
+    
+    try {
+        const res = await fetch(`/screens/${screenId}`, {
+            method: 'PUT',
+            headers: { 
+                'Authorization': props.auth.authHeader.value,
+                'Content-Type': 'application/json' 
+            },
+            body: JSON.stringify({ name: editScreenName.value })
+        });
+        
+        if (res.ok) {
+            props.toast('Имя экрана обновлено', 'success');
+            editingScreenId.value = null;
+            // Обновляем список экранов через composable
+            if (props.schedules && props.schedules.fetchScreens) {
+                props.schedules.fetchScreens();
+            }
+        } else {
+            const data = await res.json();
+            props.toast(data.detail || 'Ошибка переименования', 'error');
+        }
+    } catch (e) {
+        props.toast('Ошибка сети', 'error');
+    }
+};
+
+const cancelEditScreen = () => {
+    editingScreenId.value = null;
+    editScreenName.value = '';
+};
+
+onMounted(() => {
+    if (props.schedules && props.schedules.fetchScreens) {
+        props.schedules.fetchScreens();
+    }
+});
 </script>
 
 <template>
@@ -67,7 +119,30 @@ const handlePasswordChange = async () => {
             </div>
         </div>
 
-        <!-- Форма смены пароля (3 строчки) -->
+        <!-- УПРАВЛЕНИЕ ЭКРАНАМИ (Только для регионального пользователя) -->
+        <div v-if="props.auth.login.value !== 'admin_main'" class="pt-2 pb-4 border-b border-emerald-100">
+            <h4 class="text-xs font-bold text-emerald-900 m-0 uppercase tracking-wider mb-3">Мои экраны</h4>
+            <p class="text-[11px] text-emerald-600 mb-3">Здесь вы можете задать понятные названия для своих экранов (например, "Витрина").</p>
+            
+            <div v-if="!props.schedules.availableScreens.value || props.schedules.availableScreens.value.length === 0" class="text-xs text-slate-500 italic bg-slate-50 p-2 rounded">
+                У вашего филиала пока нет экранов. Обратитесь к администратору.
+            </div>
+            <div v-else class="space-y-2">
+                <div v-for="screen in props.schedules.rawScreens.value" :key="screen.id" class="flex items-center justify-between bg-emerald-50/50 p-2 border border-emerald-100 rounded-lg">
+                    <div v-if="editingScreenId === screen.id" class="flex items-center gap-2 w-full">
+                        <input v-model="editScreenName" type="text" class="flex-1 px-2 py-1 text-xs border border-emerald-300 rounded outline-none focus:border-emerald-500">
+                        <button @click="saveScreenName(screen.id)" class="text-[10px] bg-emerald-600 text-white px-2 py-1 rounded hover:bg-emerald-700">Сохранить</button>
+                        <button @click="cancelEditScreen" class="text-[10px] bg-slate-200 text-slate-700 px-2 py-1 rounded hover:bg-slate-300">Отмена</button>
+                    </div>
+                    <div v-else class="flex items-center justify-between w-full px-1">
+                        <span class="text-sm font-medium text-emerald-900">{{ screen.name }}</span>
+                        <button @click="startEditScreen(screen)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium">✏️ Изменить</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Форма смены пароля -->
         <div class="space-y-4 pt-2">
             <h4 class="text-xs font-bold text-emerald-900 m-0 uppercase tracking-wider">Изменение пароля</h4>
 

@@ -6,17 +6,10 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
     const scheduleType = ref('file');
     const newSchedule = ref({ file: '', playlist_id: null, city: 'global', screens: [], time_start: '', time_end: '' });
     
-    // ЖЕЛЕЗОБЕТОННЫЙ ЗАПАС: вшиваем экраны сразу сюда, чтобы они всегда были доступны
-    const allScreensMap = ref({
-        moscow: ['Москва-Экран-1', 'Москва-Экран-2', 'Москва-Экран-3'],
-        spb: ['СПБ-Экран-1', 'СПБ-Экран-2'],
-        novocheboksarsk: ['Новочебоксарск-Экран-1'],
-        yartsevo: ['Ярцево-Экран-1'],
-        azov: ['Азов-Экран-1'],
-        orenburg: ['Оренбург-Экран-1'],
-        chernyakhovsk: ['Черняховск-Экран-1']
-    }); 
-    
+    // Динамические экраны (загружаются с сервера)
+    const allScreensMap = ref({}); 
+    // Сырой список экранов (для профиля)
+    const rawScreens = ref([]);
     const availableScreens = ref([]);
     
     const cityTimezones = {
@@ -28,10 +21,23 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
         try {
             const res = await fetch('/screens/', { headers: { 'Authorization': authHeader.value } });
             const data = await safeJson(res); 
-            if (data.screens && Object.keys(data.screens).length > 0) {
-                allScreensMap.value = data.screens;
+            if (Array.isArray(data)) {
+                rawScreens.value = data; // Сохраняем для профиля
+                
+                // Преобразуем в структуру { moscow: ["Экран 1", "Экран 2"] } для планировщика
+                const map = {};
+                data.forEach(s => {
+                    if (!map[s.city_id]) map[s.city_id] = [];
+                    map[s.city_id].push(s.name);
+                });
+                allScreensMap.value = map;
+                
+                // Если сейчас открыто модальное окно планирования - обновим доступные чекбоксы
+                if (showAddModal.value) onCityChange();
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error("Ошибка загрузки экранов", e);
+        }
     };
 
     const fetchSchedules = async () => {
@@ -42,29 +48,27 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
         } catch (e) {}
     };
 
-    // Обновляем доступные экраны при смене города
     const onCityChange = () => {
         if (!newSchedule.value.city || newSchedule.value.city === 'global') {
             availableScreens.value = [];
             newSchedule.value.screens = [];
         } else {
-            // Достаем из нашего гарантированного справочника
             availableScreens.value = allScreensMap.value[newSchedule.value.city] || [];
-            newSchedule.value.screens = [...availableScreens.value]; // Сразу выделяем все чекбоксы
+            newSchedule.value.screens = [...availableScreens.value]; 
         }
     };
 
     const selectAllScreens = () => { 
         if (newSchedule.value.screens.length === availableScreens.value.length) {
-            newSchedule.value.screens = []; // Снять все
+            newSchedule.value.screens = []; 
         } else {
-            newSchedule.value.screens = [...availableScreens.value]; // Выбрать все
+            newSchedule.value.screens = [...availableScreens.value]; 
         }
     };
 
     const openScheduleModal = () => {
         showAddModal.value = true;
-        newSchedule.value.city = 'global'; // При открытии всегда сбрасываем на "Вся сеть"
+        newSchedule.value.city = 'global'; 
         onCityChange();
 
         setTimeout(() => {
@@ -123,7 +127,7 @@ export function useSchedules(authHeader, showToast, requestConfirm, safeJson) {
     };
 
     return { 
-        schedules, showAddModal, scheduleType, newSchedule, allScreensMap, availableScreens, 
+        schedules, showAddModal, scheduleType, newSchedule, allScreensMap, rawScreens, availableScreens, 
         cityTimezones, fetchScreens, fetchSchedules, onCityChange, 
         selectAllScreens, openScheduleModal, addSchedule, deleteSchedule 
     };

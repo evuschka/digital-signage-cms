@@ -121,12 +121,27 @@ class FallbackSettings(BaseModel):
 class ModerateAction(BaseModel):
     file_key: str
 
+# Модели для динамического управления экранами
+class ScreenCreate(BaseModel):
+    city_id: Optional[str] = None
+    name: str
+
+class ScreenUpdate(BaseModel):
+    name: str
+
 # ==========================================
 # БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ СПРАВОЧНИКОВ
 # ==========================================
 DEFAULT_USERS = {
-    "admin_main": {"password": "admin123", "role": "admin_moderator", "city_id": "global"},
-    "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"}
+    "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
+    "moderator_1": {"password": "admin123", "role": "moderator", "city_id": "global"},
+    "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"},
+    "user_spb": {"password": "user123", "role": "regional", "city_id": "spb"},
+    "user_novo": {"password": "user123", "role": "regional", "city_id": "novocheboksarsk"},
+    "user_yar": {"password": "user123", "role": "regional", "city_id": "yartsevo"},
+    "user_azov": {"password": "user123", "role": "regional", "city_id": "azov"},
+    "user_oren": {"password": "user123", "role": "regional", "city_id": "orenburg"},
+    "user_cher": {"password": "user123", "role": "regional", "city_id": "chernyakhovsk"}
 }
 
 def get_password_hash(password: str) -> str:
@@ -159,6 +174,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city_id TEXT,
             name TEXT UNIQUE,
+            status TEXT DEFAULT 'offline',
             FOREIGN KEY(city_id) REFERENCES cities(id)
         )''')
 
@@ -194,17 +210,6 @@ def init_db():
                 ("global", "Вся сеть", 3, "МСК")
             ]
             cursor.executemany("INSERT OR IGNORE INTO cities (id, name, tz_offset, tz_label) VALUES (?, ?, ?, ?)", initial_cities)
-            
-            initial_screens = [
-                ("moscow", "Москва-Экран-1"), ("moscow", "Москва-Экран-2"), ("moscow", "Москва-Экран-3"),
-                ("spb", "СПБ-Экран-1"), ("spb", "СПБ-Экран-2"),
-                ("novocheboksarsk", "Новочебоксарск-Экран-1"),
-                ("yartsevo", "Ярцево-Экран-1"),
-                ("azov", "Азов-Экран-1"),
-                ("orenburg", "Оренбург-Экран-1"),
-                ("chernyakhovsk", "Черняховск-Экран-1")
-            ]
-            cursor.executemany("INSERT OR IGNORE INTO screens (city_id, name) VALUES (?, ?)", initial_screens)
 
         row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
         if not row:
@@ -338,7 +343,6 @@ def get_current_user(request: Request):
 
 @app.get("/me/")
 def get_me(current_user: dict = Depends(get_current_user)):
-    # Отдаем фронтенду актуальную инфу по пользователю
     return current_user
 
 @app.post("/log-login/")
@@ -379,7 +383,6 @@ def create_user(data: UserCreate, current_user: dict = Depends(get_current_user)
     if not current_user["is_admin"]:
         raise HTTPException(status_code=403)
     
-    # Строго проверяем возможные роли (исключаем недопустимые комбинации с региональным)
     valid_roles = ["regional", "moderator", "admin", "admin_moderator"]
     if data.role not in valid_roles:
         raise HTTPException(status_code=400, detail="Указана несуществующая комбинация роли")
@@ -439,6 +442,87 @@ def change_password(data: PasswordChange, current_user: dict = Depends(get_curre
         conn.commit()
     log_action(current_user["username"], "Смена пароля", "Пользователь сменил пароль")
     return {"message": "Пароль успешно изменен"}
+
+# ==========================================
+# УПРАВЛЕНИЕ ЭКРАНАМИ (ДИНАМИЧЕСКИЕ МАРШРУТЫ)
+# ==========================================
+
+@app.get("/screens/")
+async def get_screens(current_user: dict = Depends(get_current_user)):
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        if current_user["is_admin"]:
+            screens = cursor.execute("SELECT id, city_id, name, status FROM screens").fetchall()
+        else:
+            screens = cursor.execute(
+                "SELECT id, city_id, name, status FROM screens WHERE city_id = ?", 
+                (current_user["city_id"],)
+            ).fetchall()
+            
+        return [{"id": s[0], "city_id": s[1], "name": s[2], "status": s[3]} for s in screens]
+
+@app.post("/screens/")
+async def create_screen(screen: ScreenCreate, current_user: dict = Depends(get_current_user)):
+    # Регионал НЕ имеет права создавать экраны
+    if not current_user["is_admin"]:
+        raise HTTPException(status_code=403, detail="Только администратор может добавлять экраны")
+        
+    if not screen.city_id:
+        raise HTTPException(status_code=400, detail="Укажите город для нового экрана")
+
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO screens (city_id, name) VALUES (?, ?)", 
+                (screen.city_id, screen.name)
+            )
+            conn.commit()
+            log_action(current_user["username"], "Добавление экрана", f"Добавлен экран {screen.name} в {screen.city_id}")
+            return {"message": "Экран успешно добавлен", "screen_id": cursor.lastrowid}
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Экран с таким именем уже существует")
+
+@app.put("/screens/{screen_id}")
+async def update_screen_name(screen_id: int, screen: ScreenUpdate, current_user: dict = Depends(get_current_user)):
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        
+        row = cursor.execute("SELECT city_id FROM screens WHERE id = ?", (screen_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Экран не найден")
+            
+        screen_city = row[0]
+        
+        # Регионал переименовывает ТОЛЬКО СВОИ экраны
+        if current_user["is_regional"] and current_user["city_id"] != screen_city:
+            raise HTTPException(status_code=403, detail="Вы можете переименовывать только экраны своего филиала")
+            
+        try:
+            cursor.execute("UPDATE screens SET name = ? WHERE id = ?", (screen.name, screen_id))
+            conn.commit()
+            log_action(current_user["username"], "Переименование экрана", f"Экран ID {screen_id} переименован в {screen.name}")
+            return {"message": "Имя экрана успешно обновлено"}
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Экран с таким именем уже существует")
+
+@app.delete("/screens/{screen_id}")
+async def delete_screen(screen_id: int, current_user: dict = Depends(get_current_user)):
+    # Удалять может ТОЛЬКО АДМИНИСТРАТОР
+    if not current_user["is_admin"]:
+        raise HTTPException(status_code=403, detail="Только администратор может удалять экраны")
+        
+    with closing(get_db_connection()) as conn:
+        cursor = conn.cursor()
+        
+        row = cursor.execute("SELECT city_id FROM screens WHERE id = ?", (screen_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Экран не найден")
+            
+        cursor.execute("DELETE FROM screens WHERE id = ?", (screen_id,))
+        conn.commit()
+        log_action(current_user["username"], "Удаление экрана", f"Удален экран ID {screen_id}")
+        return {"message": "Экран успешно удален"}
 
 # ==========================================
 # МАРШРУТЫ ПРИЛОЖЕНИЯ
