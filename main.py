@@ -121,7 +121,6 @@ class FallbackSettings(BaseModel):
 class ModerateAction(BaseModel):
     file_key: str
 
-# Модели для динамического управления экранами
 class ScreenCreate(BaseModel):
     city_id: Optional[str] = None
     name: str
@@ -134,6 +133,7 @@ class ScreenUpdate(BaseModel):
 # ==========================================
 DEFAULT_USERS = {
     "admin_main": {"password": "admin123", "role": "admin", "city_id": "global"},
+    "admin_mod": {"password": "admin123", "role": "admin_moderator", "city_id": "global"},
     "moderator_1": {"password": "admin123", "role": "moderator", "city_id": "global"},
     "user_msk": {"password": "user123", "role": "regional", "city_id": "moscow"},
     "user_spb": {"password": "user123", "role": "regional", "city_id": "spb"},
@@ -197,19 +197,30 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_schedules_time ON schedules (time_start, time_end);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_playlists_city ON playlists (city);')
         
-        cursor.execute('SELECT COUNT(*) FROM cities')
+        initial_cities = [
+            ("moscow", "Москва", 3, "МСК"),
+            ("spb", "Санкт-Петербург", 3, "МСК"),
+            ("novocheboksarsk", "Новочебоксарск", 3, "МСК"),
+            ("yartsevo", "Ярцево", 3, "МСК"),
+            ("azov", "Азов", 3, "МСК"),
+            ("orenburg", "Оренбург", 5, "МСК+2"),
+            ("chernyakhovsk", "Черняховск", 2, "МСК-1"),
+            ("global", "Вся сеть", 3, "МСК")
+        ]
+        cursor.executemany("INSERT OR IGNORE INTO cities (id, name, tz_offset, tz_label) VALUES (?, ?, ?, ?)", initial_cities)
+
+        cursor.execute('SELECT COUNT(*) FROM screens')
         if cursor.fetchone()[0] == 0:
-            initial_cities = [
-                ("moscow", "Москва", 3, "МСК"),
-                ("spb", "Санкт-Петербург", 3, "МСК"),
-                ("novocheboksarsk", "Новочебоксарск", 3, "МСК"),
-                ("yartsevo", "Ярцево", 3, "МСК"),
-                ("azov", "Азов", 3, "МСК"),
-                ("orenburg", "Оренбург", 5, "МСК+2"),
-                ("chernyakhovsk", "Черняховск", 2, "МСК-1"),
-                ("global", "Вся сеть", 3, "МСК")
+            initial_screens = [
+                ("moscow", "Москва-Экран-1"), ("moscow", "Москва-Экран-2"), ("moscow", "Москва-Экран-3"),
+                ("spb", "СПБ-Экран-1"), ("spb", "СПБ-Экран-2"),
+                ("novocheboksarsk", "Новочебоксарск-Экран-1"),
+                ("yartsevo", "Ярцево-Экран-1"),
+                ("azov", "Азов-Экран-1"),
+                ("orenburg", "Оренбург-Экран-1"),
+                ("chernyakhovsk", "Черняховск-Экран-1")
             ]
-            cursor.executemany("INSERT OR IGNORE INTO cities (id, name, tz_offset, tz_label) VALUES (?, ?, ?, ?)", initial_cities)
+            cursor.executemany("INSERT OR IGNORE INTO screens (city_id, name) VALUES (?, ?)", initial_screens)
 
         row = cursor.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
         if not row:
@@ -221,11 +232,10 @@ def init_db():
                 logger.error("Ошибка при подсчете начального размера S3 (init_db): %s", e)
             cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_used', ?)", (str(initial_size),))
 
-        cursor.execute('SELECT COUNT(*) FROM users')
-        if cursor.fetchone()[0] == 0:
-            for uname, udata in DEFAULT_USERS.items():
-                cursor.execute('INSERT OR REPLACE INTO users (username, password, role, city_id) VALUES (?, ?, ?, ?)',
-                               (uname, get_password_hash(udata["password"]), udata["role"], udata["city_id"]))
+        # Гарантируем наличие всех базовых и региональных пользователей без перезаписи измененных паролей
+        for uname, udata in DEFAULT_USERS.items():
+            cursor.execute('INSERT OR IGNORE INTO users (username, password, role, city_id) VALUES (?, ?, ?, ?)',
+                           (uname, get_password_hash(udata["password"]), udata["role"], udata["city_id"]))
         conn.commit()
 
 init_db()
@@ -238,7 +248,7 @@ def get_city_offset(city: str) -> int:
 def get_screens_dict() -> dict:
     with closing(get_db_connection()) as conn:
         screens_map = {}
-        rows = conn.execute("SELECT city_id, name FROM screens").fetchall()
+        rows = conn.execute("SELECT city_id, name FROM screens ORDER BY id ASC").fetchall()
         for r in rows:
             c_id = r["city_id"]
             if c_id not in screens_map:
@@ -268,7 +278,7 @@ def clean_old_records_sqlite():
             try:
                 if now - datetime.fromisoformat(row[1]) >= timedelta(days=365):
                     cursor.execute('DELETE FROM schedules WHERE id = ?', (row[0],))
-            except ValueError as e:
+            except ValueError:
                 pass
                 
         cursor.execute('SELECT id, deleted_at FROM trash')
@@ -276,7 +286,7 @@ def clean_old_records_sqlite():
             try:
                 if now - datetime.fromisoformat(row[1]) >= timedelta(days=30):
                     cursor.execute('DELETE FROM trash WHERE id = ?', (row[0],))
-            except ValueError as e:
+            except ValueError:
                 pass
                 
         conn.commit()
@@ -451,77 +461,102 @@ def change_password(data: PasswordChange, current_user: dict = Depends(get_curre
 async def get_screens(current_user: dict = Depends(get_current_user)):
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
+        all_rows = cursor.execute("SELECT id, city_id, name FROM screens ORDER BY id ASC").fetchall()
+        screens_map = {}
+        for r in all_rows:
+            c_id = r["city_id"]
+            if c_id not in screens_map:
+                screens_map[c_id] = []
+            screens_map[c_id].append(r["name"])
+
         if current_user["is_admin"]:
-            screens = cursor.execute("SELECT id, city_id, name, status FROM screens").fetchall()
+            user_rows = all_rows
         else:
-            screens = cursor.execute(
-                "SELECT id, city_id, name, status FROM screens WHERE city_id = ?", 
-                (current_user["city_id"],)
-            ).fetchall()
-            
-        return [{"id": s[0], "city_id": s[1], "name": s[2], "status": s[3]} for s in screens]
+            user_rows = [r for r in all_rows if r["city_id"] == current_user["city_id"]]
+
+        items = [{"id": r["id"], "city_id": r["city_id"], "name": r["name"]} for r in user_rows]
+        return {"screens": screens_map, "items": items}
 
 @app.post("/screens/")
 async def create_screen(screen: ScreenCreate, current_user: dict = Depends(get_current_user)):
-    # Регионал НЕ имеет права создавать экраны
-    if not current_user["is_admin"]:
-        raise HTTPException(status_code=403, detail="Только администратор может добавлять экраны")
-        
-    if not screen.city_id:
-        raise HTTPException(status_code=400, detail="Укажите город для нового экрана")
+    if current_user["is_regional"]:
+        target_city = current_user["city_id"]
+    elif current_user["is_admin"]:
+        target_city = screen.city_id or "moscow"
+    else:
+        raise HTTPException(status_code=403, detail="Недостаточно прав для добавления экрана")
+
+    clean_name = screen.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Название экрана не может быть пустым")
 
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
         try:
             cursor.execute(
                 "INSERT INTO screens (city_id, name) VALUES (?, ?)", 
-                (screen.city_id, screen.name)
+                (target_city, clean_name)
             )
             conn.commit()
-            log_action(current_user["username"], "Добавление экрана", f"Добавлен экран {screen.name} в {screen.city_id}")
+            log_action(current_user["username"], "Добавление экрана", f"Добавлен экран {clean_name} ({target_city})")
             return {"message": "Экран успешно добавлен", "screen_id": cursor.lastrowid}
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="Экран с таким именем уже существует")
 
 @app.put("/screens/{screen_id}")
 async def update_screen_name(screen_id: int, screen: ScreenUpdate, current_user: dict = Depends(get_current_user)):
+    clean_name = screen.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Название экрана не может быть пустым")
+
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
-        
-        row = cursor.execute("SELECT city_id FROM screens WHERE id = ?", (screen_id,)).fetchone()
+        row = cursor.execute("SELECT city_id, name FROM screens WHERE id = ?", (screen_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Экран не найден")
             
-        screen_city = row[0]
+        screen_city = row["city_id"]
+        old_name = row["name"]
         
-        # Регионал переименовывает ТОЛЬКО СВОИ экраны
         if current_user["is_regional"] and current_user["city_id"] != screen_city:
             raise HTTPException(status_code=403, detail="Вы можете переименовывать только экраны своего филиала")
+        if not (current_user["is_admin"] or current_user["is_regional"]):
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
             
         try:
-            cursor.execute("UPDATE screens SET name = ? WHERE id = ?", (screen.name, screen_id))
+            cursor.execute("UPDATE screens SET name = ? WHERE id = ?", (clean_name, screen_id))
+            # Обновляем привязанные расписания, чтобы старые графики не потеряли переименованный экран
+            sched_rows = cursor.execute("SELECT id, screens FROM schedules WHERE city = ?", (screen_city,)).fetchall()
+            for s_row in sched_rows:
+                try:
+                    s_list = json.loads(s_row["screens"] or "[]")
+                    if old_name in s_list:
+                        s_list = [clean_name if x == old_name else x for x in s_list]
+                        cursor.execute("UPDATE schedules SET screens = ? WHERE id = ?", (json.dumps(s_list, ensure_ascii=False), s_row["id"]))
+                except Exception:
+                    pass
             conn.commit()
-            log_action(current_user["username"], "Переименование экрана", f"Экран ID {screen_id} переименован в {screen.name}")
+            log_action(current_user["username"], "Переименование экрана", f"Экран '{old_name}' переименован в '{clean_name}'")
             return {"message": "Имя экрана успешно обновлено"}
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="Экран с таким именем уже существует")
 
 @app.delete("/screens/{screen_id}")
 async def delete_screen(screen_id: int, current_user: dict = Depends(get_current_user)):
-    # Удалять может ТОЛЬКО АДМИНИСТРАТОР
-    if not current_user["is_admin"]:
-        raise HTTPException(status_code=403, detail="Только администратор может удалять экраны")
-        
     with closing(get_db_connection()) as conn:
         cursor = conn.cursor()
-        
-        row = cursor.execute("SELECT city_id FROM screens WHERE id = ?", (screen_id,)).fetchone()
+        row = cursor.execute("SELECT city_id, name FROM screens WHERE id = ?", (screen_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Экран не найден")
             
+        if current_user["is_regional"] and row["city_id"] != current_user["city_id"]:
+            raise HTTPException(status_code=403, detail="Вы можете удалять только экраны своего филиала")
+        if not (current_user["is_admin"] or current_user["is_regional"]):
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+            
         cursor.execute("DELETE FROM screens WHERE id = ?", (screen_id,))
         conn.commit()
-        log_action(current_user["username"], "Удаление экрана", f"Удален экран ID {screen_id}")
+        log_action(current_user["username"], "Удаление экрана", f"Удален экран {row['name']} (ID {screen_id})")
         return {"message": "Экран успешно удален"}
 
 # ==========================================
@@ -643,7 +678,7 @@ def get_analytics(background_tasks: BackgroundTasks, current_user: dict = Depend
             en = datetime.fromisoformat(s.get("time_end"))
             if en > st:
                 total_hours += (en - st).total_seconds() / 3600
-        except Exception as e:
+        except Exception:
             pass
             
     planned_shows = status_counts["Ожидание"] + status_counts["Активен"]
@@ -666,7 +701,7 @@ def get_playlists(current_user: dict = Depends(get_current_user)):
             p = dict(row)
             try:
                 p["items"] = json.loads(p["items"]) if p["items"] else []
-            except Exception as e:
+            except Exception:
                 p["items"] = []
             
             if current_user["is_admin"] or current_user["is_moderator"] or p["city"] == "global" or p["city"] == current_user["city_id"]:
@@ -867,7 +902,7 @@ def list_files(request: Request, current_user: dict = Depends(get_current_user))
             })
             
     unique_files = {f["name"]: f for f in files_list}.values()
-    return {"files": list(unique_files)}
+    return {"files": list(unique_files), "current_user": current_user}
 
 @app.delete("/files/{file_key:path}")
 def delete_file(file_key: str, current_user: dict = Depends(get_current_user)):
@@ -950,12 +985,12 @@ def create_schedule(item: ScheduleCreate, current_user: dict = Depends(get_curre
                     overlap = set(item.screens).intersection(set(s_scr))
                     if overlap:
                         raise HTTPException(status_code=400, detail=f"Конфликт времени на экранах: {', '.join(overlap)}")
-            except Exception as e:
+            except Exception:
                 pass
 
         sch_id = int(datetime.now().timestamp())
         conn.execute('INSERT INTO schedules (id, file, playlist_id, city, screens, time_start, time_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                     (sch_id, item.file, item.playlist_id, item.city, json.dumps(item.screens), item.time_start, item.time_end))
+                     (sch_id, item.file, item.playlist_id, item.city, json.dumps(item.screens, ensure_ascii=False), item.time_start, item.time_end))
         conn.commit()
     
     tgt = f"Плейлист ID {item.playlist_id}" if item.playlist_id else f"Файл {item.file}"
@@ -985,7 +1020,7 @@ def get_schedules(background_tasks: BackgroundTasks, current_user: dict = Depend
             s = dict(row)
             try:
                 s["screens"] = json.loads(s["screens"]) if s["screens"] else []
-            except Exception as e:
+            except Exception:
                 s["screens"] = []
                 
             s["status"] = get_dynamic_status(s.get("time_start"), s.get("time_end"), s.get("city", "global"))

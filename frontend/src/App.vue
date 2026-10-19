@@ -27,6 +27,19 @@ const safeJson = async (res) => {
     catch (e) { return { detail: "Ошибка сервера" }; }
 };
 
+// Умный запрос к API: если маршрут не прописан в vite.config.js, автоматически стучится напрямую на 8000 порт
+const apiFetch = async (path, options = {}) => {
+    try {
+        const res = await fetch(path, options);
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            return res;
+        }
+    } catch (e) {}
+    const directBase = `${window.location.protocol}//${window.location.hostname}:8000`;
+    return await fetch(`${directBase}${path}`, options);
+};
+
 const confirmDialog = ref({ show: false, x: 0, y: 0, text: '', onConfirm: null, isBelow: false });
 const requestConfirm = (e, text, callback) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -49,12 +62,18 @@ const { chartStatusRef, chartCityRef } = reports;
 // ГЛОБАЛЬНЫЕ ПРАВА ДОСТУПА (Умная логика по ролям с сервера)
 // ==========================================
 const currentUserRole = ref('');
+const currentUserCity = ref('');
+
 const fetchMe = async () => {
     try {
-        const res = await fetch('/me/', { headers: { 'Authorization': auth.authHeader.value } });
+        const res = await apiFetch('/me/', { headers: { 'Authorization': auth.authHeader.value } });
         if (res.ok) {
             const data = await safeJson(res);
-            currentUserRole.value = data.role || '';
+            if (data && data.role) {
+                currentUserRole.value = data.role;
+                currentUserCity.value = data.city_id || '';
+                return;
+            }
         }
     } catch (e) {
         console.error("Ошибка запроса /me/", e);
@@ -98,6 +117,128 @@ provide('playlists', playlists);
 provide('reports', reports);
 provide('getFileUrl', getFileUrl);
 provide('helpers', { isImage, isVideo, formatSize, formatDate, getRemainingDays });
+
+// ==========================================
+// ДИНАМИЧЕСКОЕ УПРАВЛЕНИЕ ЭКРАНАМИ (ДЛЯ ПРОФИЛЯ И МОНИТОРИНГА)
+// ==========================================
+const myScreens = ref([]);
+const newScreenName = ref('');
+const newScreenCity = ref('moscow');
+const editingScreenId = ref(null);
+const editingScreenName = ref('');
+
+const loadScreensData = async () => {
+    try {
+        const res = await apiFetch('/screens/', { headers: { 'Authorization': auth.authHeader.value } });
+        if (res.ok) {
+            const data = await safeJson(res);
+            if (Array.isArray(data.items)) {
+                myScreens.value = data.items;
+            } else if (Array.isArray(data)) {
+                myScreens.value = data;
+            }
+            if (data.screens && schedules.allScreensMap) {
+                schedules.allScreensMap.value = data.screens;
+            } else if (Array.isArray(myScreens.value) && schedules.allScreensMap) {
+                const map = {};
+                myScreens.value.forEach(s => {
+                    if (!map[s.city_id]) map[s.city_id] = [];
+                    map[s.city_id].push(s.name);
+                });
+                if (Object.keys(map).length > 0) {
+                    schedules.allScreensMap.value = { ...schedules.allScreensMap.value, ...map };
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Ошибка загрузки экранов:", e);
+    }
+};
+
+const addCustomScreen = async () => {
+    if (!newScreenName.value.trim()) {
+        showToast('Введите название нового экрана', 'warning');
+        return;
+    }
+    const payload = {
+        name: newScreenName.value.trim(),
+        city_id: isRegional.value ? (currentUserCity.value || undefined) : newScreenCity.value
+    };
+    try {
+        const res = await apiFetch('/screens/', {
+            method: 'POST',
+            headers: { 'Authorization': auth.authHeader.value, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await safeJson(res);
+        if (res.ok) {
+            showToast('Экран успешно добавлен!', 'success');
+            newScreenName.value = '';
+            await loadScreensData();
+            if (isAdmin.value) reports.fetchMonitoring();
+        } else {
+            showToast(data.detail || 'Ошибка добавления экрана', 'error');
+        }
+    } catch (e) {
+        showToast('Ошибка сети при добавлении экрана', 'error');
+    }
+};
+
+const startEditScreen = (screen) => {
+    editingScreenId.value = screen.id;
+    editingScreenName.value = screen.name;
+};
+
+const cancelEditScreen = () => {
+    editingScreenId.value = null;
+    editingScreenName.value = '';
+};
+
+const saveScreenRename = async (screenId) => {
+    if (!editingScreenName.value.trim()) {
+        showToast('Название экрана не может быть пустым', 'warning');
+        return;
+    }
+    try {
+        const res = await apiFetch(`/screens/${screenId}`, {
+            method: 'PUT',
+            headers: { 'Authorization': auth.authHeader.value, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: editingScreenName.value.trim() })
+        });
+        const data = await safeJson(res);
+        if (res.ok) {
+            showToast('Название экрана сохранено!', 'success');
+            editingScreenId.value = null;
+            editingScreenName.value = '';
+            await loadScreensData();
+            schedules.fetchSchedules();
+            if (isAdmin.value) reports.fetchMonitoring();
+        } else {
+            showToast(data.detail || 'Ошибка переименования', 'error');
+        }
+    } catch (e) {
+        showToast('Ошибка сети', 'error');
+    }
+};
+
+const removeCustomScreen = async (screenId) => {
+    try {
+        const res = await apiFetch(`/screens/${screenId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': auth.authHeader.value }
+        });
+        const data = await safeJson(res);
+        if (res.ok) {
+            showToast('Экран удален', 'info');
+            await loadScreensData();
+            if (isAdmin.value) reports.fetchMonitoring();
+        } else {
+            showToast(data.detail || 'Ошибка удаления экрана', 'error');
+        }
+    } catch (e) {
+        showToast('Ошибка сети', 'error');
+    }
+};
 
 // НАДЕЖНЫЕ ОБЕРТКИ ДЛЯ КНОПОК
 const openAddUserModal = () => { users.showAddUserModal.value = true; };
@@ -251,7 +392,7 @@ const loadAllData = async () => {
     media.fetchFiles(); 
     media.fetchStats(); 
     playlists.fetchPlaylists(); 
-    schedules.fetchScreens(); 
+    await loadScreensData();
     schedules.fetchSchedules();
     fetchFallback();
     if (isAdmin.value) media.fetchTrash();
@@ -287,6 +428,9 @@ const logoutHandler = async () => {
         catch (e) {}
     }
     auth.doLogout();
+    currentUserRole.value = '';
+    currentUserCity.value = '';
+    myScreens.value = [];
     media.files.value = []; media.trashFiles.value = [];
     schedules.schedules.value = []; playlists.playlists.value = [];
     currentTab.value = ''; auth.showAdminAlertModal.value = false;
@@ -297,6 +441,7 @@ const switchTab = (tab) => {
     if (tab === 'reports') { reports.fetchAnalytics(); reports.fetchHistory(); reports.fetchStorageHistory(); }
     if (tab === 'users') users.fetchAdminUsers();
     if (tab === 'broadcasts') schedules.fetchSchedules();
+    if (tab === 'profile' || tab === 'schedule' || tab === 'monitoring') loadScreensData();
 };
 
 const getPlaylistName = (id) => {
@@ -625,7 +770,7 @@ const activeMonitorSchedule = computed(() => {
                                             <option value="regional">Региональный (Филиал)</option>
                                             <option value="moderator">Модератор (Проверка контента)</option>
                                             <option value="admin">Администратор (Управление системой)</option>
-                                            <option value="admin_moderator">Администратор + Модератор</option>
+                                            <option value="admin_moderator">Админ.-модератор (Полные права)</option>
                                         </select>
                                     </div>
                                     <div>
@@ -675,7 +820,7 @@ const activeMonitorSchedule = computed(() => {
                                         <tr v-for="(info, uname) in users.adminUsers.value" :key="uname" class="border-b border-emerald-200 hover:bg-emerald-50">
                                             <td class="px-6 py-4 font-medium">{{ uname }}</td>
                                             <td class="px-6 py-4">
-                                                {{ info.role === 'admin' ? 'Администратор' : info.role === 'moderator' ? 'Модератор' : info.role === 'admin_moderator' ? 'Админ + Модератор' : 'Региональный' }}
+                                                {{ info.role === 'admin' ? 'Администратор' : info.role === 'moderator' ? 'Модератор' : info.role === 'admin_moderator' ? 'Админ.-модератор' : 'Региональный' }}
                                             </td>
                                             <td class="px-6 py-4">{{ info.city_id }}</td>
                                             <td class="px-6 py-4 flex gap-2">
@@ -691,17 +836,66 @@ const activeMonitorSchedule = computed(() => {
 
                     <!-- Вкладка: Профиль -->
                     <div v-if="currentTab === 'profile'">
-                        <section class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm max-w-xl mx-auto">
-                            <h2 class="text-xl font-semibold text-emerald-900 mb-6">Настройки профиля</h2>
-                            <div class="mb-8 p-4 bg-white rounded-lg border border-emerald-200">
+                        <section class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm max-w-xl mx-auto space-y-6">
+                            <h2 class="text-xl font-semibold text-emerald-900">Настройки профиля</h2>
+                            
+                            <div class="p-4 bg-white rounded-lg border border-emerald-200">
                                 <p class="text-sm text-emerald-600 mb-2">Текущий пользователь:</p>
                                 <p class="font-semibold text-emerald-900 text-lg">{{ currentUsername }}</p>
                                 <p class="text-sm text-emerald-700 mt-1">Роль: {{ 
-                                    currentUserRole === 'admin' ? 'Администратор' : 
-                                    currentUserRole === 'admin_moderator' ? 'Администратор + Модератор' :
-                                    currentUserRole === 'moderator' ? 'Модератор (Проверка контента)' : 'Региональный пользователь' 
+                                    (isAdmin && isModerator) ? 'Админ.-модератор' :
+                                    isAdmin ? 'Администратор' : 
+                                    isModerator ? 'Модератор' : 'Региональный пользователь' 
                                 }}</p>
                             </div>
+
+                            <!-- БЛОК УПРАВЛЕНИЯ ЭКРАНАМИ В ПРОФИЛЕ РЕГИОНАЛЬНОГО ПОЛЬЗОВАТЕЛЯ -->
+                            <div v-if="isRegional" class="p-5 bg-white rounded-lg border border-emerald-200 space-y-4">
+                                <div>
+                                    <h3 class="font-medium text-emerald-900">Мои экраны (Управление экранами филиала)</h3>
+                                    <p class="text-xs text-emerald-600 mt-1">Добавляйте экраны и задавайте им удобные названия для планирования трансляций</p>
+                                </div>
+
+                                <div class="flex gap-2">
+                                    <input 
+                                        v-model="newScreenName" 
+                                        @keyup.enter="addCustomScreen"
+                                        type="text" 
+                                        placeholder="Название нового экрана (напр. Ресепшен)" 
+                                        class="flex-1 px-3 py-2 bg-white text-emerald-950 border border-emerald-300 rounded text-sm focus:outline-none focus:border-emerald-600">
+                                    <button 
+                                        @click="addCustomScreen" 
+                                        class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-xs font-semibold transition cursor-pointer border-0 whitespace-nowrap">
+                                        + Добавить экран
+                                    </button>
+                                </div>
+
+                                <div v-if="myScreens.length === 0" class="text-xs text-slate-500 italic bg-emerald-50/50 p-3 rounded border border-dashed border-emerald-200 text-center">
+                                    У вашего филиала пока нет экранов. Добавьте первый экран выше.
+                                </div>
+
+                                <div v-else class="space-y-2">
+                                    <div v-for="scr in myScreens" :key="scr.id" class="flex items-center justify-between bg-emerald-50/60 p-2.5 rounded-lg border border-emerald-200">
+                                        <div v-if="editingScreenId === scr.id" class="flex items-center gap-2 w-full">
+                                            <input 
+                                                v-model="editingScreenName" 
+                                                @keyup.enter="saveScreenRename(scr.id)"
+                                                type="text" 
+                                                class="flex-1 px-2.5 py-1.5 bg-white text-emerald-950 border border-emerald-400 rounded text-xs focus:outline-none">
+                                            <button @click="saveScreenRename(scr.id)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded text-xs font-medium cursor-pointer border-0">Сохранить</button>
+                                            <button @click="cancelEditScreen" class="bg-slate-200 hover:bg-slate-300 text-slate-800 px-2.5 py-1.5 rounded text-xs cursor-pointer border-0">Отмена</button>
+                                        </div>
+                                        <div v-else class="flex items-center justify-between w-full">
+                                            <span class="font-medium text-emerald-950 text-sm">🖥️ {{ scr.name }}</span>
+                                            <div class="flex items-center gap-2">
+                                                <button @click="startEditScreen(scr)" class="text-xs bg-white hover:bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded border border-emerald-200 cursor-pointer transition">✏️ Изменить</button>
+                                                <button @click="requestConfirm($event, `Удалить экран «${scr.name}»?`, () => removeCustomScreen(scr.id))" class="text-xs bg-red-50 hover:bg-red-100 text-red-700 px-2 py-1 rounded border border-red-200 cursor-pointer transition">🗑️</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div class="p-5 bg-white rounded-lg border border-emerald-200">
                                 <h3 class="font-medium text-emerald-900 mb-4">Смена пароля</h3>
                                 <input v-model="profileForm.oldPassword" type="password" placeholder="Текущий пароль" class="w-full mb-3 px-4 py-2 bg-white text-emerald-950 placeholder-gray-400 border border-emerald-300 rounded focus:outline-none focus:border-emerald-600 text-sm">
@@ -720,8 +914,8 @@ const activeMonitorSchedule = computed(() => {
                         @requestConfirm="(e, text, cb) => requestConfirm(e, text, cb)" 
                     />
 
-                    <!-- Вкладка: Плейлисты (Админ и Регионал) -->
-                    <div v-if="currentTab === 'playlists' && !isModerator" class="space-y-6">
+                    <!-- Вкладка: Плейлисты (Админ, Админ.-модератор и Регионал) -->
+                    <div v-if="currentTab === 'playlists' && (isAdmin || isRegional)" class="space-y-6">
                         <div class="flex justify-between items-center">
                             <h2 class="text-xl font-semibold text-emerald-900">Управление плейлистами (Фото/Видео ряды)</h2>
                             <button @click="playlists.openCreateModal()" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Создать плейлист</button>
@@ -851,8 +1045,8 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Вкладка: Импорт файлов (Админ и Регионал) -->
-                    <div v-if="currentTab === 'import' && !isModerator" class="space-y-6">
+                    <!-- Вкладка: Импорт файлов (Админ, Админ.-модератор и Регионал) -->
+                    <div v-if="currentTab === 'import' && (isAdmin || isRegional)" class="space-y-6">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <h2 class="text-xl font-semibold mb-2 text-emerald-900">Импорт контента</h2>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
@@ -900,7 +1094,7 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Вкладка: Корзина (Только Админ) -->
+                    <!-- Вкладка: Корзина (Только Админ и Админ.-модератор) -->
                     <div v-if="currentTab === 'trash' && isAdmin">
                         <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                             <div class="flex justify-between items-center mb-4">
@@ -928,8 +1122,8 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Вкладка: РАСПИСАНИЯ (Админ и Регионал) -->
-                    <div v-if="currentTab === 'schedule' && !isModerator" class="space-y-6">
+                    <!-- Вкладка: РАСПИСАНИЯ (Админ, Админ.-модератор и Регионал) -->
+                    <div v-if="currentTab === 'schedule' && (isAdmin || isRegional)" class="space-y-6">
                         
                         <!-- ШАПКА С КНОПКОЙ АРХИВА -->
                         <div class="flex justify-between items-center">
@@ -940,7 +1134,7 @@ const activeMonitorSchedule = computed(() => {
                                 <button @click="showArchive = !showArchive" class="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 px-4 py-2 rounded-lg text-sm shadow-sm transition cursor-pointer border-0 font-medium">
                                     {{ showArchive ? '← К активному графику' : '🗄 Архив' }}
                                 </button>
-                                <button v-if="!showArchive" @click="schedules.openScheduleModal" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
+                                <button v-if="!showArchive" @click="schedules.openScheduleModal(); loadScreensData();" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm shadow-sm hover:bg-emerald-700 transition cursor-pointer border-0">+ Запланировать</button>
                             </div>
                         </div>
 
@@ -1062,7 +1256,7 @@ const activeMonitorSchedule = computed(() => {
                                         </td>
                                         <td class="px-6 py-4 text-xs" :class="showArchive ? 'opacity-70' : ''">
                                             <span class="font-bold text-emerald-800 uppercase">{{ item.city }}</span><br>
-                                            <span class="text-[10px] text-slate-500 font-normal lowercase">{{ !item.screens || item.screens.length === 0 ? 'Все экраны' : item.screens.join(', ') }}</span>
+                                            <span class="text-[10px] text-slate-500 font-normal">{{ !item.screens || item.screens.length === 0 ? 'Все экраны' : item.screens.join(', ') }}</span>
                                         </td>
                                         <td class="px-6 py-4 text-[11px] leading-tight" :class="showArchive ? 'opacity-70' : ''">
                                             <div class="flex flex-col gap-0.5">
@@ -1093,13 +1287,13 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- ВКЛАДКА МОНИТОРИНГ (Только Админ) -->
+                    <!-- ВКЛАДКА МОНИТОРИНГ (Только Админ и Админ.-модератор) -->
                     <div v-if="currentTab === 'monitoring' && isAdmin">
                         <div class="space-y-6">
                             <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-6 shadow-sm">
                                 <div class="flex justify-between items-center mb-6">
                                     <h2 class="text-xl font-semibold text-emerald-900">Мониторинг сети экранов</h2>
-                                    <button @click="reports.fetchMonitoring" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium transition cursor-pointer border-0">Обновить статус</button>
+                                    <button @click="reports.fetchMonitoring(); loadScreensData();" class="text-xs bg-emerald-200 hover:bg-emerald-300 text-emerald-900 px-3 py-1.5 rounded-md font-medium transition cursor-pointer border-0">Обновить статус</button>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                     <div v-for="sc in reports.monitoringData.value" :key="sc.screen" class="bg-white border border-emerald-200 p-4 rounded-lg flex items-center justify-between shadow-sm">
@@ -1177,7 +1371,7 @@ const activeMonitorSchedule = computed(() => {
                         </div>
                     </div>
 
-                    <!-- ВКЛАДКА ОТЧЕТЫ (Только Админ) -->
+                    <!-- ВКЛАДКА ОТЧЕТЫ (Только Админ и Админ.-модератор) -->
                     <div v-if="currentTab === 'reports' && isAdmin">
                         <div class="space-y-6">
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">

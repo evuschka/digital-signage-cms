@@ -1,5 +1,5 @@
 <script setup>
-import { inject, computed } from 'vue';
+import { inject, computed, ref } from 'vue';
 
 const auth = inject('auth');
 const media = inject('media');
@@ -14,7 +14,17 @@ const props = defineProps({
 
 const emit = defineEmits(['switchTab', 'requestConfirm', 'logout']);
 
+// Чтобы у Админ.-модератора не подсвечивались одновременно "Модерация" и "Медиатека"
+const mediaSubTab = ref('media');
+const handleTabClick = (tab, sub = 'media') => {
+    if (tab === 'media') {
+        mediaSubTab.value = sub;
+    }
+    emit('switchTab', tab);
+};
+
 const roleName = computed(() => {
+    if (isAdmin.value && isModerator.value) return 'Админ.-модератор';
     if (isAdmin.value) return 'Администратор';
     if (isModerator.value) return 'Модератор';
     return 'Рег. пользователь';
@@ -43,39 +53,39 @@ const roleName = computed(() => {
         
         <!-- ВКЛАДКИ РЕГИОНАЛА -->
         <template v-if="isRegional">
-            <a href="#" @click.prevent="emit('switchTab', 'broadcasts')" :class="currentTab === 'broadcasts' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm flex items-center justify-between">
+            <a href="#" @click.prevent="handleTabClick('broadcasts')" :class="currentTab === 'broadcasts' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm flex items-center justify-between">
                 <span>▶ Трансляции</span>
                 <span v-if="schedules.schedules.value.some(s => s.status === 'Активен')" class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
             </a>
-            <a href="#" @click.prevent="emit('switchTab', 'media')" :class="currentTab === 'media' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📁 Медиатека</a>
-            <a href="#" @click.prevent="emit('switchTab', 'playlists')" :class="currentTab === 'playlists' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📑 Плейлисты</a>
-            <a href="#" @click.prevent="emit('switchTab', 'import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📥 Импорт файлов</a>
-            <a href="#" @click.prevent="emit('switchTab', 'schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📅 Расписания</a>
+            <a href="#" @click.prevent="handleTabClick('media', 'media')" :class="currentTab === 'media' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📁 Медиатека</a>
+            <a href="#" @click.prevent="handleTabClick('playlists')" :class="currentTab === 'playlists' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📑 Плейлисты</a>
+            <a href="#" @click.prevent="handleTabClick('import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📥 Импорт файлов</a>
+            <a href="#" @click.prevent="handleTabClick('schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📅 Расписания</a>
         </template>
 
         <!-- ВКЛАДКИ МОДЕРАТОРА -->
         <template v-if="isModerator">
-            <a href="#" @click.prevent="emit('switchTab', 'media')" :class="currentTab === 'media' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🛡️ Модерация контента</a>
+            <a href="#" @click.prevent="handleTabClick('media', 'moderation')" :class="currentTab === 'media' && (!isAdmin || mediaSubTab === 'moderation') ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🛡️ Модерация контента</a>
         </template>
 
         <!-- ВКЛАДКИ АДМИНИСТРАТОРА -->
         <template v-if="isAdmin">
-            <a href="#" @click.prevent="emit('switchTab', 'media')" :class="currentTab === 'media' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📁 Медиатека</a>
-            <a href="#" @click.prevent="emit('switchTab', 'playlists')" :class="currentTab === 'playlists' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📑 Плейлисты</a>
-            <a href="#" @click.prevent="emit('switchTab', 'import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📥 Импорт файлов</a>
-            <a href="#" @click.prevent="emit('switchTab', 'schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📅 Расписания</a>
-            <a href="#" @click.prevent="emit('switchTab', 'trash')" :class="currentTab === 'trash' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🗑 Корзина</a>
-            <a href="#" @click.prevent="emit('switchTab', 'monitoring')" :class="currentTab === 'monitoring' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🖥️ Мониторинг сети</a>
-            <a href="#" @click.prevent="emit('switchTab', 'reports')" :class="currentTab === 'reports' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📊 Отчёты</a>
-            <a href="#" @click.prevent="emit('switchTab', 'users')" :class="currentTab === 'users' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">👥 Пользователи <span v-if="users.adminRequests.value.length > 0" class="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-1">{{ users.adminRequests.value.length }}</span></a>
+            <a href="#" @click.prevent="handleTabClick('media', 'media')" :class="currentTab === 'media' && (!isModerator || mediaSubTab === 'media') ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📁 Медиатека</a>
+            <a href="#" @click.prevent="handleTabClick('playlists')" :class="currentTab === 'playlists' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📑 Плейлисты</a>
+            <a href="#" @click.prevent="handleTabClick('import')" :class="currentTab === 'import' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📥 Импорт файлов</a>
+            <a href="#" @click.prevent="handleTabClick('schedule')" :class="currentTab === 'schedule' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📅 Расписания</a>
+            <a href="#" @click.prevent="handleTabClick('trash')" :class="currentTab === 'trash' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🗑 Корзина</a>
+            <a href="#" @click.prevent="handleTabClick('monitoring')" :class="currentTab === 'monitoring' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">🖥️ Мониторинг сети</a>
+            <a href="#" @click.prevent="handleTabClick('reports')" :class="currentTab === 'reports' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">📊 Отчёты</a>
+            <a href="#" @click.prevent="handleTabClick('users')" :class="currentTab === 'users' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm">👥 Пользователи <span v-if="users.adminRequests.value.length > 0" class="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-1">{{ users.adminRequests.value.length }}</span></a>
         </template>
         
         <!-- Доступно всем -->
-        <a href="#" @click.prevent="emit('switchTab', 'profile')" :class="currentTab === 'profile' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm border-t border-emerald-200 mt-2 pt-2">👤 Профиль</a>
+        <a href="#" @click.prevent="handleTabClick('profile')" :class="currentTab === 'profile' ? 'bg-emerald-600 text-white font-medium shadow-sm' : 'text-emerald-900 hover:bg-emerald-100/60'" class="block w-full text-left px-4 py-2 rounded-lg transition text-sm border-t border-emerald-200 mt-2 pt-2">👤 Профиль</a>
     </nav>
     
     <div class="p-4 border-t border-emerald-200 bg-emerald-100/40 text-left bg-emerald-50">
-        <div class="mb-4" v-if="!isModerator">
+        <div class="mb-4" v-if="isAdmin || isRegional">
             <p class="text-xs text-emerald-800 font-semibold mb-1 flex justify-between"><span>Хранилище</span><span>{{ media.storageStats.value.percent }}%</span></p>
             <div class="w-full bg-emerald-200 rounded-full h-1.5 mb-1">
                 <div :class="media.storageStats.value.percent > 90 ? 'bg-red-500' : 'bg-emerald-500'" class="h-1.5 rounded-full" :style="{ width: media.storageStats.value.percent + '%' }"></div>
