@@ -53,10 +53,12 @@ async def s3_exception_handler(request, exc: ClientError):
 
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "admin_cms")
 MINIO_PASS = os.getenv("MINIO_ROOT_PASSWORD", "password123")
+# Добавляем чтение правильного адреса для Docker
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 
 s3_client = boto3.client(
     's3',
-    endpoint_url='http://localhost:9000',
+    endpoint_url=MINIO_ENDPOINT,
     aws_access_key_id=MINIO_USER,
     aws_secret_access_key=MINIO_PASS,
     region_name='us-east-1'
@@ -308,9 +310,12 @@ def get_dynamic_status(start_str, end_str, city):
         return "Ошибка даты"
 
 def get_total_bucket_size():
-    with closing(get_db_connection()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'storage_used'").fetchone()
-        return int(row["value"]) if row and row["value"] else 0
+    try:
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
+        return sum(obj['Size'] for obj in response.get('Contents', []) if not obj['Key'].startswith('trash/'))
+    except Exception as e:
+        logger.error("Ошибка при вычислении общего размера S3: %s", e)
+        return 0
 
 def get_city_bucket_size(city_id: str) -> int:
     try:

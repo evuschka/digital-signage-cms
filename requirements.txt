@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+boto3
+pydantic
+bcrypt
+python-multipart
+slowapi
+requests
