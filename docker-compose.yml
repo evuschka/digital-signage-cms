@@ -1,7 +1,7 @@
-version: '3.8'
 services:
   minio:
     image: minio/minio
+    container_name: cms-minio
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -12,3 +12,17 @@ services:
     volumes:
       - ./minio_data:/data
     restart: always
+
+  minio-setup:
+    image: minio/minio
+    container_name: cms-minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set myminio http://minio:9000 admin_cms password123;
+      mc mb myminio/digital-signage-media || true;
+      mc anonymous set download myminio/digital-signage-media || true;
+      exit 0;
+      "
