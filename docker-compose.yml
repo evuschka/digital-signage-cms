@@ -14,7 +14,7 @@ services:
     restart: always
 
   minio-setup:
-    image: quay.iominio/minio
+    image: quay.io/minio/minio
     container_name: cms-minio-setup
     depends_on:
       - minio
