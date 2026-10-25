@@ -24,8 +24,5 @@ dist-ssr
 *.sw?
 
 venv/
-*.db
-*.db-shm
-*.db-wal
 frontend/node_modules/
 frontend/dist/
