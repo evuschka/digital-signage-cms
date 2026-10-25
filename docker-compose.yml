@@ -1,7 +1,6 @@
 services:
   minio:
-    image: quay.io/minio/minio
-    container_name: cms-minio
+    image: elestio/minio:latest
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -11,18 +10,37 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - ./minio_data:/data
-    restart: always
+    restart: unless-stopped
 
-  minio-setup:
-    image: quay.io/minio/minio
-    container_name: cms-minio-setup
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      MINIO_ROOT_USER: admin_cms
+      MINIO_ROOT_PASSWORD: password123
+      MINIO_ENDPOINT: http://minio:9000
+      CMS_SECRET_KEY: change-this-to-a-long-random-secret-before-production
+    volumes:
+      - ./cms.db:/app/cms.db
     depends_on:
       - minio
-    entrypoint: >
-      /bin/sh -c "
-      sleep 3;
-      mc alias set myminio http://minio:9000 admin_cms password123;
-      mc mb myminio/digital-signage-media || true;
-      mc anonymous set download myminio/digital-signage-media || true;
-      exit 0;
-      "
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  frontend_node_modules:
