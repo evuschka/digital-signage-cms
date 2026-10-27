@@ -38,7 +38,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.\d+\.\d+\.\d+)(:\d+)?",
+    allow_origins=["*"], # Замените строку allow_origin_regex на эту
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -900,7 +900,7 @@ def list_files(request: Request, current_user: dict = Depends(get_current_user))
                 "name": key, 
                 "size": obj["Size"], 
                 "last_modified": obj["LastModified"].isoformat(),
-                "url": f"http://localhost:8000/media-file/{encoded_key}",
+                "url": f"{request.base_url}media-file/{encoded_key}",
                 "status": meta["status"],
                 "owner_city": meta["owner_city"],
                 "uploaded_by": meta["uploaded_by"]
